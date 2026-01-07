@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-builder-config
+  namespace: tas-agent-builder
+  labels:
+    app: agent-builder
+data:
+  # Server Configuration
+  SERVER_HOST: "0.0.0.0"
+  SERVER_PORT: "8087"
+  SERVER_READ_TIMEOUT: "30"
+  SERVER_WRITE_TIMEOUT: "30"
+  SERVER_IDLE_TIMEOUT: "60"
+
+  # Database Configuration (Shared PostgreSQL)
+  DB_HOST: "postgres-shared.tas-shared"
+  DB_PORT: "5432"
+  DB_NAME: "tas_shared"
+  DB_SSL_MODE: "disable"
+  DB_MAX_OPEN_CONNS: "25"
+  DB_MAX_IDLE_CONNS: "5"
+  DB_MAX_LIFETIME: "300"
+
+  # TAS-LLM-Router Configuration
+  ROUTER_BASE_URL: "http://llm-router.tas-llm-router:8086"
+  ROUTER_TIMEOUT: "30"
+  ROUTER_MAX_RETRIES: "3"
+
+  # Authentication Configuration
+  JWT_EXPIRATION: "3600"
+  ALLOWED_ORIGINS: "https://aether.tas.scharber.com,https://dashboard.tas.scharber.com"
+
+  # Logging Configuration
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+  LOG_OUTPUT: "stdout"
+  LOG_MAX_SIZE: "100"
+  LOG_MAX_BACKUPS: "3"
+  LOG_MAX_AGE: "7"
+  LOG_COMPRESS: "true"
