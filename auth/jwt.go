@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/rsa"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -62,13 +63,11 @@ type JWTValidator struct {
 
 // NewJWTValidator creates a new JWT validator
 func NewJWTValidator(secret string, allowedIssuers []string) *JWTValidator {
-	// Use localhost when running outside Docker, container network URL when in Docker
-	jwksURL := "http://localhost:8081/realms/master/protocol/openid-connect/certs"
-	
 	return &JWTValidator{
 		secret:         []byte(secret),
 		allowedIssuers: allowedIssuers,
-		jwksURL:        jwksURL,
+		// jwksURL will be derived from the token's issuer claim dynamically
+		jwksURL:        "",
 	}
 }
 
@@ -76,7 +75,23 @@ func NewJWTValidator(secret string, allowedIssuers []string) *JWTValidator {
 func (v *JWTValidator) ValidateToken(tokenString string) (*Claims, error) {
 	// Remove Bearer prefix if present
 	tokenString = strings.TrimPrefix(tokenString, "Bearer ")
-	
+
+	// First, parse without validation to get the issuer for JWKS URL
+	parser := jwt.NewParser()
+	unverifiedToken, _, err := parser.ParseUnverified(tokenString, &Claims{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse token: %w", err)
+	}
+
+	// Extract issuer from unverified claims to build JWKS URL
+	unverifiedClaims, ok := unverifiedToken.Claims.(*Claims)
+	if !ok {
+		return nil, errors.New("failed to extract claims from token")
+	}
+
+	// Build JWKS URL from issuer (e.g., https://keycloak.example.com/realms/aether -> .../protocol/openid-connect/certs)
+	jwksURL := unverifiedClaims.Iss + "/protocol/openid-connect/certs"
+
 	// Parse and validate the token
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		// Get the key ID from token header
@@ -87,13 +102,13 @@ func (v *JWTValidator) ValidateToken(tokenString string) (*Claims, error) {
 
 		// Validate signing method
 		if _, ok := token.Method.(*jwt.SigningMethodRSA); ok {
-			// For RSA tokens (Keycloak), fetch the public key
-			return v.getRSAPublicKey(kid)
+			// For RSA tokens (Keycloak), fetch the public key using dynamic JWKS URL
+			return v.getRSAPublicKeyFromURL(kid, jwksURL)
 		} else if _, ok := token.Method.(*jwt.SigningMethodHMAC); ok {
 			// For HMAC tokens, use the secret
 			return v.secret, nil
 		}
-		
+
 		return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 	})
 
@@ -148,14 +163,25 @@ func (v *JWTValidator) ExtractUserContext(claims *Claims) (userID, tenantID stri
 	return userID, tenantID
 }
 
-// getRSAPublicKey fetches the RSA public key from Keycloak JWKS endpoint
-func (v *JWTValidator) getRSAPublicKey(kid string) (*rsa.PublicKey, error) {
-	// Fetch JWKS from Keycloak
-	resp, err := http.Get(v.jwksURL)
+// getRSAPublicKeyFromURL fetches the RSA public key from a dynamic JWKS endpoint
+func (v *JWTValidator) getRSAPublicKeyFromURL(kid string, jwksURL string) (*rsa.PublicKey, error) {
+	// Create HTTP client that skips TLS verification for internal/self-signed certs
+	// This is needed when Keycloak uses Let's Encrypt or self-signed certificates
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: tr, Timeout: 10 * time.Second}
+
+	// Fetch JWKS from the dynamically determined URL
+	resp, err := client.Get(jwksURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
+		return nil, fmt.Errorf("failed to fetch JWKS from %s: %w", jwksURL, err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("JWKS endpoint returned status %d", resp.StatusCode)
+	}
 
 	var jwks JWKS
 	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
@@ -169,7 +195,15 @@ func (v *JWTValidator) getRSAPublicKey(kid string) (*rsa.PublicKey, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("no RSA key found with kid: %s", kid)
+	return nil, fmt.Errorf("no RSA key found with kid: %s in JWKS from %s", kid, jwksURL)
+}
+
+// getRSAPublicKey fetches the RSA public key from the configured JWKS endpoint (deprecated, use getRSAPublicKeyFromURL)
+func (v *JWTValidator) getRSAPublicKey(kid string) (*rsa.PublicKey, error) {
+	if v.jwksURL == "" {
+		return nil, errors.New("no JWKS URL configured")
+	}
+	return v.getRSAPublicKeyFromURL(kid, v.jwksURL)
 }
 
 // parseRSAPublicKey converts JWK to RSA public key

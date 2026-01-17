@@ -140,7 +140,13 @@ func setupRouter(agentHandlers *handlers.AgentHandlers, routerProxy *handlers.Ro
 	v1 := router.Group("/api/v1")
 	
 	// Add authentication middleware for API routes
+	// Support multiple Keycloak realms and deployment scenarios
 	jwtValidator := auth.NewJWTValidator(cfg.Auth.JWTSecret, []string{
+		// Aether realm (production)
+		"https://keycloak.tas.scharber.com/realms/aether",
+		"http://tas-keycloak-shared:8080/realms/aether",
+		"http://localhost:8081/realms/aether",
+		// Master realm (legacy/fallback)
 		"http://localhost:8081/realms/master",
 		"http://tas-keycloak-shared:8080/realms/master",
 	})
