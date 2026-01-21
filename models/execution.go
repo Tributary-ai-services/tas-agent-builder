@@ -38,13 +38,48 @@ func (s *ExecutionStep) Scan(value interface{}) error {
 	if value == nil {
 		return nil
 	}
-	
+
 	bytes, ok := value.([]byte)
 	if !ok {
 		return json.Unmarshal([]byte(value.(string)), s)
 	}
-	
+
 	return json.Unmarshal(bytes, s)
+}
+
+// ExecutionStepList is a custom type for GORM to properly handle JSONB array of ExecutionStep
+type ExecutionStepList []ExecutionStep
+
+func (e ExecutionStepList) Value() (driver.Value, error) {
+	if e == nil {
+		return json.Marshal([]ExecutionStep{})
+	}
+	return json.Marshal(e)
+}
+
+func (e *ExecutionStepList) Scan(value interface{}) error {
+	if value == nil {
+		*e = ExecutionStepList{}
+		return nil
+	}
+
+	bytes, ok := value.([]byte)
+	if !ok {
+		strVal, ok := value.(string)
+		if !ok {
+			*e = ExecutionStepList{}
+			return nil
+		}
+		bytes = []byte(strVal)
+	}
+
+	var steps []ExecutionStep
+	if err := json.Unmarshal(bytes, &steps); err != nil {
+		*e = ExecutionStepList{}
+		return nil // Don't fail on unmarshal errors, just use empty list
+	}
+	*e = steps
+	return nil
 }
 
 type RouterResponse struct {
@@ -88,7 +123,7 @@ type AgentExecution struct {
 	
 	RouterResponse *RouterResponse `json:"router_response,omitempty" gorm:"type:jsonb"`
 	
-	ExecutionSteps []ExecutionStep `json:"execution_steps,omitempty" gorm:"type:jsonb;default:'[]'"`
+	ExecutionSteps ExecutionStepList `json:"execution_steps,omitempty" gorm:"type:jsonb;default:'[]'"`
 	
 	TokenUsage      *int     `json:"token_usage,omitempty"`
 	CostUSD         *float64 `json:"cost_usd,omitempty" gorm:"type:decimal(10,6)"`
