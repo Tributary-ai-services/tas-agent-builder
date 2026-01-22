@@ -250,7 +250,7 @@ func (s *routerServiceImpl) GetAvailableProviders(ctx context.Context) ([]servic
 		case "openai":
 			providers[i].Models = []string{"gpt-3.5-turbo", "gpt-4o", "gpt-4", "gpt-4-turbo"}
 		case "anthropic":
-			providers[i].Models = []string{"claude-3-5-sonnet-20241022", "claude-3-haiku-20240307", "claude-3-opus-20240229"}
+			providers[i].Models = []string{"claude-sonnet-4-20250514", "claude-3-haiku-20240307", "claude-3-opus-20240229"}
 		}
 	}
 
