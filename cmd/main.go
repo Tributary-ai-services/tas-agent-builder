@@ -47,10 +47,9 @@ func main() {
 	agentService := impl.NewAgentService(db)
 	routerService := impl.NewRouterService(&cfg.Router)
 	executionService := impl.NewExecutionService(db, routerService)
-	_ = executionService // TODO: Wire up execution service to handlers when needed
-	
+
 	// Initialize handlers
-	agentHandlers := handlers.NewAgentHandlers(agentService, routerService)
+	agentHandlers := handlers.NewAgentHandlers(agentService, routerService, executionService)
 	routerProxy := handlers.NewRouterProxyHandler(cfg.Router.BaseURL)
 	
 	// Setup router
@@ -152,6 +151,15 @@ func setupRouter(agentHandlers *handlers.AgentHandlers, routerProxy *handlers.Ro
 	})
 	v1.Use(authMiddleware(jwtValidator))
 	
+	// Internal agent routes (system tools) - must come BEFORE /:id routes
+	// These are available to all authenticated users
+	internalAgents := v1.Group("/agents/internal")
+	{
+		internalAgents.GET("", agentHandlers.GetInternalAgents)
+		internalAgents.GET("/:id", agentHandlers.GetInternalAgent)
+		internalAgents.POST("/:id/execute", agentHandlers.ExecuteInternalAgent)
+	}
+
 	// Agent routes - only add routes that are actually implemented
 	agents := v1.Group("/agents")
 	{
@@ -160,7 +168,7 @@ func setupRouter(agentHandlers *handlers.AgentHandlers, routerProxy *handlers.Ro
 		agents.GET("/:id", agentHandlers.GetAgent)
 		agents.PUT("/:id", agentHandlers.UpdateAgent)
 		agents.DELETE("/:id", agentHandlers.DeleteAgent)
-		
+
 		agents.POST("/:id/publish", agentHandlers.PublishAgent)
 		agents.POST("/:id/unpublish", agentHandlers.UnpublishAgent)
 		agents.POST("/:id/duplicate", agentHandlers.DuplicateAgent)

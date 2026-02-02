@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -15,14 +16,16 @@ import (
 )
 
 type AgentHandlers struct {
-	agentService  services.AgentService
-	routerService services.RouterService
+	agentService     services.AgentService
+	routerService    services.RouterService
+	executionService services.ExecutionService
 }
 
-func NewAgentHandlers(agentService services.AgentService, routerService services.RouterService) *AgentHandlers {
+func NewAgentHandlers(agentService services.AgentService, routerService services.RouterService, executionService services.ExecutionService) *AgentHandlers {
 	return &AgentHandlers{
-		agentService:  agentService,
-		routerService: routerService,
+		agentService:     agentService,
+		routerService:    routerService,
+		executionService: executionService,
 	}
 }
 
@@ -390,6 +393,158 @@ func (h *AgentHandlers) GetAgent(c *gin.Context) {
 	c.JSON(http.StatusOK, agent)
 }
 
+// GetInternalAgents returns all internal (system) agents
+// These are available to all users regardless of ownership
+func (h *AgentHandlers) GetInternalAgents(c *gin.Context) {
+	agents, err := h.agentService.GetInternalAgents(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch internal agents", "details": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"agents": agents,
+		"count":  len(agents),
+	})
+}
+
+// GetInternalAgent returns a specific internal agent by ID
+func (h *AgentHandlers) GetInternalAgent(c *gin.Context) {
+	idParam := c.Param("id")
+	agentID, err := uuid.Parse(idParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid agent ID"})
+		return
+	}
+
+	agent, err := h.agentService.GetInternalAgent(c.Request.Context(), agentID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, agent)
+}
+
+// ExecuteInternalAgent executes an internal agent without requiring space context
+func (h *AgentHandlers) ExecuteInternalAgent(c *gin.Context) {
+	startTime := time.Now()
+
+	idParam := c.Param("id")
+	agentID, err := uuid.Parse(idParam)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid agent ID"})
+		return
+	}
+
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return
+	}
+
+	userStr, ok := userID.(string)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	// Parse execution request
+	var req map[string]interface{}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body", "details": err.Error()})
+		return
+	}
+
+	// Get the internal agent (no ownership check needed)
+	agent, err := h.agentService.GetInternalAgent(c.Request.Context(), agentID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Internal agent not found"})
+		return
+	}
+
+	// Extract input from request
+	input, ok := req["input"].(string)
+	if !ok || input == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Input is required"})
+		return
+	}
+
+	// Build messages for router service
+	messages := []services.Message{
+		{
+			Role:    "system",
+			Content: agent.SystemPrompt,
+		},
+	}
+
+	// Add conversation history if provided
+	if history, exists := req["history"]; exists {
+		if historySlice, ok := history.([]interface{}); ok {
+			for _, msg := range historySlice {
+				if msgMap, ok := msg.(map[string]interface{}); ok {
+					role, _ := msgMap["role"].(string)
+					content, _ := msgMap["content"].(string)
+					if role != "" && content != "" {
+						messages = append(messages, services.Message{Role: role, Content: content})
+					}
+				}
+			}
+		}
+	}
+
+	// Add the current user message
+	messages = append(messages, services.Message{
+		Role:    "user",
+		Content: input,
+	})
+
+	// Convert user ID to UUID for router call
+	userUUID, err := uuid.Parse(userStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID format"})
+		return
+	}
+
+	// Call router service
+	response, err := h.routerService.SendRequest(c.Request.Context(), agent.LLMConfig, messages, userUUID)
+
+	// Calculate total duration
+	totalDuration := int(time.Since(startTime).Milliseconds())
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Execution failed", "details": err.Error()})
+		return
+	}
+
+	// Build execution response
+	executionID := uuid.New()
+
+	executionResponse := gin.H{
+		"execution_id": executionID.String(),
+		"output":       response.Content,
+		"tokens_used":  response.TokenUsage,
+		"cost_usd":     response.CostUSD,
+		"metadata": gin.H{
+			"model":            response.Model,
+			"provider":         response.Provider,
+			"routing_strategy": response.RoutingStrategy,
+			"response_time_ms": response.ResponseTimeMs,
+			"total_time_ms":    totalDuration,
+		},
+	}
+
+	// Add session/conversation ID if provided
+	if sid, ok := req["session_id"].(string); ok && sid != "" {
+		executionResponse["conversation_id"] = sid
+	} else {
+		// Generate a new conversation ID
+		executionResponse["conversation_id"] = uuid.New().String()
+	}
+
+	c.JSON(http.StatusOK, executionResponse)
+}
+
 func (h *AgentHandlers) UpdateAgent(c *gin.Context) {
 	idParam := c.Param("id")
 	agentID, err := uuid.Parse(idParam)
@@ -555,6 +710,19 @@ func (h *AgentHandlers) ListAgents(c *gin.Context) {
 		return
 	}
 
+	// DEBUG: Log agent types before returning
+	for i, agent := range response.Agents {
+		log.Printf("DEBUG: Agent[%d] id=%s name=%s type=%s status=%s", i, agent.ID.String(), agent.Name, agent.Type, agent.Status)
+	}
+
+	// DEBUG: Also log the raw JSON that will be sent
+	jsonBytes, _ := json.Marshal(response)
+	truncLen := len(jsonBytes)
+	if truncLen > 1000 {
+		truncLen = 1000
+	}
+	log.Printf("DEBUG: Raw response JSON (first %d chars): %s", truncLen, string(jsonBytes)[:truncLen])
+
 	c.JSON(http.StatusOK, response)
 }
 
@@ -673,6 +841,8 @@ func (h *AgentHandlers) DuplicateAgent(c *gin.Context) {
 }
 
 func (h *AgentHandlers) ExecuteAgent(c *gin.Context) {
+	startTime := time.Now()
+
 	idParam := c.Param("id")
 	agentID, err := uuid.Parse(idParam)
 	if err != nil {
@@ -720,7 +890,7 @@ func (h *AgentHandlers) ExecuteAgent(c *gin.Context) {
 			Content: h.buildSystemPrompt(agent),
 		},
 		{
-			Role:    "user", 
+			Role:    "user",
 			Content: input,
 		},
 	}
@@ -740,22 +910,76 @@ func (h *AgentHandlers) ExecuteAgent(c *gin.Context) {
 		}
 	}
 
-	// Convert user ID to UUID for router call
+	// Convert user ID to UUID for router call and execution record
 	userUUID, err := uuid.Parse(userStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID format"})
 		return
 	}
 
+	// Extract session ID if provided
+	var sessionID *string
+	if sid, ok := req["session_id"].(string); ok && sid != "" {
+		sessionID = &sid
+	}
+
+	// Create execution record (status: running)
+	inputJSON, _ := json.Marshal(req)
+	executionReq := models.StartExecutionRequest{
+		AgentID:   agentID,
+		SessionID: sessionID,
+		InputData: map[string]any{
+			"input":    input,
+			"messages": messages,
+		},
+	}
+
+	execution, err := h.executionService.StartExecution(c.Request.Context(), executionReq, userUUID)
+	if err != nil {
+		// Log but don't fail - execution tracking is non-critical
+		fmt.Printf("Failed to create execution record: %v\n", err)
+	}
+
 	// Call router service
 	response, err := h.routerService.SendRequest(c.Request.Context(), agent.LLMConfig, messages, userUUID)
+
+	// Calculate total duration
+	totalDuration := int(time.Since(startTime).Milliseconds())
+
 	if err != nil {
+		// Update execution with failure
+		if execution != nil {
+			errorMsg := err.Error()
+			h.executionService.CompleteExecution(c.Request.Context(), execution.ID, models.ExecutionStatusFailed, nil, &errorMsg, totalDuration)
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Execution failed", "details": err.Error()})
 		return
 	}
 
+	// Update execution with success
+	outputData := map[string]any{
+		"content":          response.Content,
+		"tokens_used":      response.TokenUsage,
+		"cost_usd":         response.CostUSD,
+		"model":            response.Model,
+		"provider":         response.Provider,
+		"routing_strategy": response.RoutingStrategy,
+		"response_time_ms": response.ResponseTimeMs,
+	}
+
+	if execution != nil {
+		outputJSON, _ := json.Marshal(outputData)
+		_ = inputJSON // suppress unused warning
+		_ = outputJSON
+		h.executionService.CompleteExecution(c.Request.Context(), execution.ID, models.ExecutionStatusCompleted, outputData, nil, totalDuration)
+	}
+
 	// Build execution response
 	executionID := uuid.New()
+	if execution != nil {
+		executionID = execution.ID
+	}
+
 	executionResponse := gin.H{
 		"execution_id": executionID.String(),
 		"output":       response.Content,

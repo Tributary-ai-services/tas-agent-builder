@@ -11,6 +11,7 @@ import (
 
 type AgentStatus string
 type SpaceType string
+type AgentType string
 
 const (
 	AgentStatusDraft      AgentStatus = "draft"
@@ -19,6 +20,10 @@ const (
 
 	SpaceTypePersonal      SpaceType = "personal"
 	SpaceTypeOrganization  SpaceType = "organization"
+
+	AgentTypeConversational AgentType = "conversational"
+	AgentTypeQA             AgentType = "qa"
+	AgentTypeProducer       AgentType = "producer"
 )
 
 type AgentLLMConfig struct {
@@ -170,9 +175,11 @@ type Agent struct {
 	
 	Status    AgentStatus `json:"status" gorm:"type:varchar(50);not null;default:'draft'"`
 	SpaceType SpaceType   `json:"space_type" gorm:"type:varchar(50);not null"`
-	
+	Type      AgentType   `json:"type" gorm:"type:varchar(50);not null;default:'conversational'"`
+
 	IsPublic   bool `json:"is_public" gorm:"default:false"`
 	IsTemplate bool `json:"is_template" gorm:"default:false"`
+	IsInternal bool `json:"is_internal" gorm:"default:false"` // System agents available to all users
 	
 	NotebookIDs datatypes.JSON `json:"notebook_ids" gorm:"type:jsonb;default:'[]'"`
 	
@@ -189,7 +196,7 @@ type Agent struct {
 }
 
 func (Agent) TableName() string {
-	return "ab_agents"
+	return "agent_builder.agents"
 }
 
 type CreateAgentRequest struct {
@@ -198,22 +205,27 @@ type CreateAgentRequest struct {
 	SystemPrompt string         `json:"system_prompt" validate:"required,min=1"`
 	LLMConfig    AgentLLMConfig `json:"llm_config" validate:"required"`
 	SpaceID      string         `json:"space_id" validate:"required"`
+	SpaceType    SpaceType      `json:"space_type"` // "personal" or "organization" - defaults to "personal" if not specified
+	Type         AgentType      `json:"type"`       // "conversational", "qa", or "producer" - defaults to "conversational"
 	IsPublic     bool           `json:"is_public"`
 	IsTemplate   bool           `json:"is_template"`
+	IsInternal   bool           `json:"is_internal"` // System agents - only settable by system
 	NotebookIDs  []uuid.UUID    `json:"notebook_ids"`
 	Tags         []string       `json:"tags"`
 }
 
 type UpdateAgentRequest struct {
-	Name         *string        `json:"name,omitempty" validate:"omitempty,min=1,max=255"`
-	Description  *string        `json:"description,omitempty" validate:"omitempty,max=1000"`
-	SystemPrompt *string        `json:"system_prompt,omitempty" validate:"omitempty,min=1"`
+	Name         *string         `json:"name,omitempty" validate:"omitempty,min=1,max=255"`
+	Description  *string         `json:"description,omitempty" validate:"omitempty,max=1000"`
+	SystemPrompt *string         `json:"system_prompt,omitempty" validate:"omitempty,min=1"`
 	LLMConfig    *AgentLLMConfig `json:"llm_config,omitempty"`
-	Status       *AgentStatus   `json:"status,omitempty"`
-	IsPublic     *bool          `json:"is_public,omitempty"`
-	IsTemplate   *bool          `json:"is_template,omitempty"`
-	NotebookIDs  []uuid.UUID    `json:"notebook_ids,omitempty"`
-	Tags         []string       `json:"tags,omitempty"`
+	Status       *AgentStatus    `json:"status,omitempty"`
+	Type         *AgentType      `json:"type,omitempty"`
+	IsPublic     *bool           `json:"is_public,omitempty"`
+	IsTemplate   *bool           `json:"is_template,omitempty"`
+	IsInternal   *bool           `json:"is_internal,omitempty"` // System agents - only settable by system
+	NotebookIDs  []uuid.UUID     `json:"notebook_ids,omitempty"`
+	Tags         []string        `json:"tags,omitempty"`
 }
 
 type AgentListResponse struct {
@@ -231,6 +243,7 @@ type AgentListFilter struct {
 	SpaceType  *SpaceType   `json:"space_type"`
 	IsPublic   *bool        `json:"is_public"`
 	IsTemplate *bool        `json:"is_template"`
+	IsInternal *bool        `json:"is_internal"` // Filter for system agents
 	Tags       []string     `json:"tags"`
 	Search     string       `json:"search"`
 	Page       int          `json:"page"`

@@ -50,6 +50,53 @@ func (s *ExecutionServiceImpl) StartExecution(ctx context.Context, req models.St
 	return execution, nil
 }
 
+func (s *ExecutionServiceImpl) CompleteExecution(ctx context.Context, executionID uuid.UUID, status models.ExecutionStatus, outputData map[string]any, errorMsg *string, durationMs int) error {
+	now := time.Now()
+
+	updates := map[string]interface{}{
+		"status":            status,
+		"total_duration_ms": durationMs,
+		"completed_at":      now,
+		"updated_at":        now,
+	}
+
+	// Add output data if provided
+	if outputData != nil {
+		outputJSON, err := json.Marshal(outputData)
+		if err == nil {
+			updates["output_data"] = datatypes.JSON(outputJSON)
+		}
+
+		// Extract token usage and cost if available
+		if tokenUsage, ok := outputData["tokens_used"].(int); ok {
+			updates["token_usage"] = tokenUsage
+		}
+		if costUSD, ok := outputData["cost_usd"].(float64); ok {
+			updates["cost_usd"] = costUSD
+		}
+		if provider, ok := outputData["provider"].(string); ok {
+			updates["router_provider"] = provider
+		}
+		if model, ok := outputData["model"].(string); ok {
+			updates["router_model"] = model
+		}
+		if strategy, ok := outputData["routing_strategy"].(string); ok {
+			updates["routing_strategy"] = strategy
+		}
+	}
+
+	// Add error message if provided
+	if errorMsg != nil {
+		updates["error_message"] = *errorMsg
+	}
+
+	result := s.db.Model(&models.AgentExecution{}).
+		Where("id = ?", executionID).
+		Updates(updates)
+
+	return result.Error
+}
+
 func (s *ExecutionServiceImpl) GetExecution(ctx context.Context, id uuid.UUID, userID uuid.UUID) (*models.AgentExecution, error) {
 	var execution models.AgentExecution
 	

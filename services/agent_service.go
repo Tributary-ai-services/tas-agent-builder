@@ -23,15 +23,20 @@ type AgentService interface {
 	GetAgentsBySpace(ctx context.Context, spaceID uuid.UUID, userID string) ([]models.Agent, error)
 	GetPublicAgents(ctx context.Context, filter models.AgentListFilter) (*models.AgentListResponse, error)
 	GetAgentTemplates(ctx context.Context, filter models.AgentListFilter) (*models.AgentListResponse, error)
+
+	// Internal agents (system agents available to all users)
+	GetInternalAgents(ctx context.Context) ([]models.Agent, error)
+	GetInternalAgent(ctx context.Context, id uuid.UUID) (*models.Agent, error)
 }
 
 type ExecutionService interface {
 	StartExecution(ctx context.Context, req models.StartExecutionRequest, userID uuid.UUID) (*models.AgentExecution, error)
+	CompleteExecution(ctx context.Context, executionID uuid.UUID, status models.ExecutionStatus, outputData map[string]any, errorMsg *string, durationMs int) error
 	GetExecution(ctx context.Context, id uuid.UUID, userID uuid.UUID) (*models.AgentExecution, error)
 	ListExecutions(ctx context.Context, filter models.ExecutionListFilter, userID uuid.UUID) (*models.ExecutionListResponse, error)
-	
+
 	CancelExecution(ctx context.Context, id uuid.UUID, userID uuid.UUID) error
-	
+
 	GetExecutionsByAgent(ctx context.Context, agentID uuid.UUID, userID uuid.UUID, limit int) ([]models.AgentExecution, error)
 	GetExecutionsBySession(ctx context.Context, sessionID string, userID uuid.UUID) ([]models.AgentExecution, error)
 }

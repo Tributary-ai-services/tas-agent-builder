@@ -1,0 +1,55 @@
+# =============================================================================
+# DEPRECATED - DO NOT APPLY
+# =============================================================================
+#
+# This ingress has been removed to enforce aether-be as the single entry point
+# for all agent operations. This ensures Neo4j and PostgreSQL stay in sync.
+#
+# Architecture:
+#   Frontend → aether-be (API Gateway) → agent-builder (internal only)
+#
+# The agent-builder service is only accessible via internal ClusterIP service:
+#   http://agent-builder.tas-agent-builder:8087/api/v1
+#
+# All agent CRUD operations should go through aether-be which:
+#   1. Creates/updates/deletes in agent-builder (PostgreSQL)
+#   2. Syncs the changes to Neo4j with proper relationships
+#
+# Date deprecated: 2026-01-28
+# =============================================================================
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agent-builder-ingress
+  namespace: tas-agent-builder
+  labels:
+    app: agent-builder
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    # CORS headers for API
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://aether.tas.scharber.com,https://dashboard.tas.scharber.com"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - agent-builder.tas.scharber.com
+    secretName: agent-builder-tls
+  rules:
+  - host: agent-builder.tas.scharber.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: agent-builder
+            port:
+              number: 8087

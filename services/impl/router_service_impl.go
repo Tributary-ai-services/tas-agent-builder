@@ -317,12 +317,13 @@ type RouterRequest struct {
 }
 
 // RetryConfig defines retry behavior for failed requests
+// Note: BaseDelay and MaxDelay use time.Duration (int64 nanoseconds) to match LLM router expectations
 type RetryConfig struct {
-	MaxAttempts     int      `json:"max_attempts"`                         // Maximum retry attempts (1-5)
-	BackoffType     string   `json:"backoff_type,omitempty"`               // "exponential" or "linear"
-	BaseDelay       string   `json:"base_delay,omitempty"`                 // Base delay between retries (e.g., "1s", "500ms")
-	MaxDelay        string   `json:"max_delay,omitempty"`                  // Maximum delay cap (e.g., "30s")
-	RetryableErrors []string `json:"retryable_errors,omitempty"`           // Error patterns that trigger retries
+	MaxAttempts     int           `json:"max_attempts"`                   // Maximum retry attempts (1-5)
+	BackoffType     string        `json:"backoff_type,omitempty"`         // "exponential" or "linear"
+	BaseDelay       time.Duration `json:"base_delay,omitempty"`           // Base delay between retries
+	MaxDelay        time.Duration `json:"max_delay,omitempty"`            // Maximum delay cap
+	RetryableErrors []string      `json:"retryable_errors,omitempty"`     // Error patterns that trigger retries
 }
 
 // FallbackConfig defines automatic fallback to alternative providers
@@ -421,16 +422,30 @@ type ReliabilityMetadata struct {
 }
 
 // buildRetryConfig converts agent retry config to router format
+// Parses string durations (e.g., "5s", "30s") to time.Duration for LLM router compatibility
 func buildRetryConfig(agentRetry *models.RetryConfig) *RetryConfig {
 	if agentRetry == nil {
 		return nil
 	}
 
+	// Parse string durations to time.Duration
+	var baseDelay, maxDelay time.Duration
+	if agentRetry.BaseDelay != "" {
+		if parsed, err := time.ParseDuration(agentRetry.BaseDelay); err == nil {
+			baseDelay = parsed
+		}
+	}
+	if agentRetry.MaxDelay != "" {
+		if parsed, err := time.ParseDuration(agentRetry.MaxDelay); err == nil {
+			maxDelay = parsed
+		}
+	}
+
 	return &RetryConfig{
 		MaxAttempts:     agentRetry.MaxAttempts,
 		BackoffType:     agentRetry.BackoffType,
-		BaseDelay:       agentRetry.BaseDelay,
-		MaxDelay:        agentRetry.MaxDelay,
+		BaseDelay:       baseDelay,
+		MaxDelay:        maxDelay,
 		RetryableErrors: agentRetry.RetryableErrors,
 	}
 }

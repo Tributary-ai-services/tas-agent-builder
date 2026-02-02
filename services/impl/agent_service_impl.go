@@ -24,6 +24,18 @@ func NewAgentService(db *gorm.DB) services.AgentService {
 }
 
 func (s *agentServiceImpl) CreateAgent(ctx context.Context, req models.CreateAgentRequest, ownerID string, tenantID string) (*models.Agent, error) {
+	// Default SpaceType to personal if not specified
+	spaceType := req.SpaceType
+	if spaceType == "" {
+		spaceType = models.SpaceTypePersonal
+	}
+
+	// Default Type to conversational if not specified
+	agentType := req.Type
+	if agentType == "" {
+		agentType = models.AgentTypeConversational
+	}
+
 	agent := &models.Agent{
 		ID:           uuid.New(),
 		Name:         req.Name,
@@ -32,10 +44,13 @@ func (s *agentServiceImpl) CreateAgent(ctx context.Context, req models.CreateAge
 		LLMConfig:    req.LLMConfig,
 		OwnerID:      ownerID,
 		SpaceID:      req.SpaceID,
+		SpaceType:    spaceType,
+		Type:         agentType,
 		TenantID:     tenantID,
 		Status:       models.AgentStatusDraft,
 		IsPublic:     req.IsPublic,
 		IsTemplate:   req.IsTemplate,
+		IsInternal:   req.IsInternal,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
 	}
@@ -65,9 +80,10 @@ func (s *agentServiceImpl) CreateAgent(ctx context.Context, req models.CreateAge
 
 func (s *agentServiceImpl) GetAgent(ctx context.Context, id uuid.UUID, userID string) (*models.Agent, error) {
 	var agent models.Agent
-	
+
 	query := s.db.WithContext(ctx).Where("id = ?", id)
-	query = query.Where("(owner_id = ? OR is_public = true)", userID)
+	// Include internal agents for all users
+	query = query.Where("(owner_id = ? OR is_public = true OR is_internal = true)", userID)
 	
 	if err := query.First(&agent).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -119,11 +135,17 @@ func (s *agentServiceImpl) UpdateAgent(ctx context.Context, id uuid.UUID, req mo
 	if req.Status != nil {
 		updates["status"] = *req.Status
 	}
+	if req.Type != nil {
+		updates["type"] = *req.Type
+	}
 	if req.IsPublic != nil {
 		updates["is_public"] = *req.IsPublic
 	}
 	if req.IsTemplate != nil {
 		updates["is_template"] = *req.IsTemplate
+	}
+	if req.IsInternal != nil {
+		updates["is_internal"] = *req.IsInternal
 	}
 	
 	if req.NotebookIDs != nil {
@@ -152,14 +174,27 @@ func (s *agentServiceImpl) UpdateAgent(ctx context.Context, id uuid.UUID, req mo
 }
 
 func (s *agentServiceImpl) DeleteAgent(ctx context.Context, id uuid.UUID, ownerID string) error {
-	result := s.db.WithContext(ctx).Where("id = ? AND owner_id = ?", id, ownerID).Delete(&models.Agent{})
-	
+	// Check if agent exists
+	var count int64
+	s.db.WithContext(ctx).Model(&models.Agent{}).Where("id = ?", id).Count(&count)
+	if count == 0 {
+		return fmt.Errorf("agent not found")
+	}
+
+	// Delete related records first (executions, etc.) to avoid foreign key constraint errors
+	// Delete agent executions
+	if err := s.db.WithContext(ctx).Where("agent_id = ?", id).Delete(&models.AgentExecution{}).Error; err != nil {
+		return fmt.Errorf("failed to delete agent executions: %w", err)
+	}
+
+	// Now delete the agent itself
+	result := s.db.WithContext(ctx).Where("id = ?", id).Delete(&models.Agent{})
 	if result.Error != nil {
 		return fmt.Errorf("failed to delete agent: %w", result.Error)
 	}
-	
+
 	if result.RowsAffected == 0 {
-		return fmt.Errorf("agent not found or access denied")
+		return fmt.Errorf("failed to delete agent")
 	}
 
 	return nil
@@ -167,8 +202,9 @@ func (s *agentServiceImpl) DeleteAgent(ctx context.Context, id uuid.UUID, ownerI
 
 func (s *agentServiceImpl) ListAgents(ctx context.Context, filter models.AgentListFilter, userID string) (*models.AgentListResponse, error) {
 	query := s.db.WithContext(ctx).Model(&models.Agent{})
-	
-	query = query.Where("(owner_id = ? OR is_public = true)", userID)
+
+	// Include internal agents for all users, plus owned/public agents
+	query = query.Where("(owner_id = ? OR is_public = true OR is_internal = true)", userID)
 	
 	if filter.OwnerID != nil {
 		query = query.Where("owner_id = ?", *filter.OwnerID)
@@ -191,12 +227,23 @@ func (s *agentServiceImpl) ListAgents(ctx context.Context, filter models.AgentLi
 	if filter.IsTemplate != nil {
 		query = query.Where("is_template = ?", *filter.IsTemplate)
 	}
+	if filter.IsInternal != nil {
+		query = query.Where("is_internal = ?", *filter.IsInternal)
+	}
 	
 	if filter.Search != "" {
 		searchPattern := "%" + filter.Search + "%"
 		query = query.Where("name ILIKE ? OR description ILIKE ?", searchPattern, searchPattern)
 	}
-	
+
+	// Filter by tags - check if the agent's tags JSON array contains the specified tags
+	if len(filter.Tags) > 0 {
+		for _, tag := range filter.Tags {
+			// Use PostgreSQL JSONB @> operator to check if tags array contains the specified tag
+			query = query.Where("tags @> ?", fmt.Sprintf(`["%s"]`, tag))
+		}
+	}
+
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
 		return nil, fmt.Errorf("failed to count agents: %w", err)
@@ -324,4 +371,34 @@ func (s *agentServiceImpl) GetPublicAgents(ctx context.Context, filter models.Ag
 func (s *agentServiceImpl) GetAgentTemplates(ctx context.Context, filter models.AgentListFilter) (*models.AgentListResponse, error) {
 	filter.IsTemplate = &[]bool{true}[0]
 	return s.ListAgents(ctx, filter, "")
+}
+
+// GetInternalAgents returns all internal (system) agents available to all users
+func (s *agentServiceImpl) GetInternalAgents(ctx context.Context) ([]models.Agent, error) {
+	var agents []models.Agent
+
+	if err := s.db.WithContext(ctx).
+		Where("is_internal = ? AND deleted_at IS NULL", true).
+		Order("name ASC").
+		Find(&agents).Error; err != nil {
+		return nil, fmt.Errorf("failed to get internal agents: %w", err)
+	}
+
+	return agents, nil
+}
+
+// GetInternalAgent returns a specific internal agent by ID (no ownership check needed)
+func (s *agentServiceImpl) GetInternalAgent(ctx context.Context, id uuid.UUID) (*models.Agent, error) {
+	var agent models.Agent
+
+	if err := s.db.WithContext(ctx).
+		Where("id = ? AND is_internal = ? AND deleted_at IS NULL", id, true).
+		First(&agent).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("internal agent not found")
+		}
+		return nil, fmt.Errorf("failed to get internal agent: %w", err)
+	}
+
+	return &agent, nil
 }

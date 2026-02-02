@@ -160,6 +160,34 @@ DEFAULT_SPACE_ID=default
 ENABLE_SPACE_ISOLATION=true
 ```
 
+## Architecture: Aether-BE as Single Entry Point
+
+**IMPORTANT**: All agent operations should go through **aether-be**, not directly to agent-builder.
+
+```
+Frontend/API Clients → aether-be (API Gateway) → agent-builder (internal only)
+                           ↓
+                        Neo4j (relationships, metadata)
+```
+
+### Why This Architecture?
+
+Agents are stored in two databases:
+1. **PostgreSQL** (agent-builder) - Agent definitions, LLM configs, executions
+2. **Neo4j** (aether-be) - Relationships (ownership, teams), permissions, graph queries
+
+aether-be acts as a synchronization layer:
+- **Create**: Creates in agent-builder → Creates in Neo4j with `agent_builder_id` mapping
+- **Update**: Updates agent-builder → Syncs changes to Neo4j
+- **Delete**: Deletes from agent-builder → Removes from Neo4j
+
+### Network Access
+
+- **External Ingress**: REMOVED (was `agent-builder.tas.scharber.com`)
+- **Internal Only**: `http://agent-builder.tas-agent-builder:8087/api/v1`
+
+Only aether-be should call agent-builder directly. Direct external access is blocked to ensure database consistency.
+
 ## Important Notes
 
 - **API Keys**: LLM provider API keys (OpenAI, Anthropic) are configured in TAS-LLM-Router, NOT in this service
@@ -167,6 +195,7 @@ ENABLE_SPACE_ISOLATION=true
 - **Space Isolation**: Always verify space context when creating or executing agents
 - **Database Migrations**: Run migrations before first use with `make db-migrate-up`
 - **Shared Infrastructure**: Requires TAS shared PostgreSQL and Redis services
+- **No External Access**: This service is internal-only; all requests must go through aether-be
 - Integration with shared TAS infrastructure via `tas-shared-network` Docker network
 
 ## Development Workflow
