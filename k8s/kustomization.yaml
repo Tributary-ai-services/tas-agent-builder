@@ -9,7 +9,6 @@ resources:
 - secret.yaml
 - deployment.yaml
 - service.yaml
-- ingress.yaml
 
 commonLabels:
   app.kubernetes.io/name: agent-builder

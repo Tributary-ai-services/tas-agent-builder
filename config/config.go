@@ -8,11 +8,15 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `json:"server"`
-	Database DatabaseConfig `json:"database"`
-	Router   RouterConfig   `json:"router"`
-	Auth     AuthConfig     `json:"auth"`
-	Logging  LoggingConfig  `json:"logging"`
+	Server    ServerConfig    `json:"server"`
+	Database  DatabaseConfig  `json:"database"`
+	Router    RouterConfig    `json:"router"`
+	Auth      AuthConfig      `json:"auth"`
+	Logging   LoggingConfig   `json:"logging"`
+	DeepLake  DeepLakeConfig  `json:"deeplake"`
+	AudiModal AudiModalConfig `json:"audimodal"`
+	Aether    AetherConfig    `json:"aether"`
+	Redis     RedisConfig     `json:"redis"`
 }
 
 type ServerConfig struct {
@@ -58,6 +62,39 @@ type LoggingConfig struct {
 	Compress   bool   `json:"compress"`
 }
 
+// DeepLakeConfig holds configuration for DeepLake vector search API
+type DeepLakeConfig struct {
+	BaseURL           string `json:"base_url"`
+	APIKey            string `json:"api_key"`
+	Timeout           int    `json:"timeout"`
+	DefaultDataset    string `json:"default_dataset"`
+	UseDefaultDataset bool   `json:"use_default_dataset"`
+}
+
+// AudiModalConfig holds configuration for AudiModal document processing API
+type AudiModalConfig struct {
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+	Timeout int    `json:"timeout"`
+}
+
+// AetherConfig holds configuration for Aether-BE API (Neo4j integration)
+type AetherConfig struct {
+	BaseURL string `json:"base_url"`
+	APIKey  string `json:"api_key"`
+	Timeout int    `json:"timeout"`
+}
+
+// RedisConfig holds configuration for Redis caching
+type RedisConfig struct {
+	Host              string `json:"host"`
+	Port              int    `json:"port"`
+	Password          string `json:"password"`
+	DB                int    `json:"db"`
+	ContextCacheTTL   int    `json:"context_cache_ttl"`   // TTL for document context cache in seconds
+	EnableContextCache bool  `json:"enable_context_cache"`
+}
+
 func LoadConfig() (*Config, error) {
 	config := &Config{
 		Server: ServerConfig{
@@ -97,6 +134,31 @@ func LoadConfig() (*Config, error) {
 			MaxBackups: getEnvAsInt("LOG_MAX_BACKUPS", 3),
 			MaxAge:     getEnvAsInt("LOG_MAX_AGE", 7),
 			Compress:   getEnvAsBool("LOG_COMPRESS", true),
+		},
+		DeepLake: DeepLakeConfig{
+			BaseURL:           getEnv("DEEPLAKE_BASE_URL", "http://localhost:8000"),
+			APIKey:            getEnv("DEEPLAKE_API_KEY", ""),
+			Timeout:           getEnvAsInt("DEEPLAKE_TIMEOUT", 30),
+			DefaultDataset:    getEnv("DEEPLAKE_DEFAULT_DATASET", "documents"),
+			UseDefaultDataset: getEnvAsBool("DEEPLAKE_USE_DEFAULT_DATASET", true),
+		},
+		AudiModal: AudiModalConfig{
+			BaseURL: getEnv("AUDIMODAL_BASE_URL", "http://localhost:8084"),
+			APIKey:  getEnv("AUDIMODAL_API_KEY", ""),
+			Timeout: getEnvAsInt("AUDIMODAL_TIMEOUT", 30),
+		},
+		Aether: AetherConfig{
+			BaseURL: getEnv("AETHER_BASE_URL", "http://localhost:8080"),
+			APIKey:  getEnv("AETHER_INTERNAL_API_KEY", ""),
+			Timeout: getEnvAsInt("AETHER_TIMEOUT", 30),
+		},
+		Redis: RedisConfig{
+			Host:               getEnv("REDIS_HOST", "localhost"),
+			Port:               getEnvAsInt("REDIS_PORT", 6379),
+			Password:           getEnv("REDIS_PASSWORD", ""),
+			DB:                 getEnvAsInt("REDIS_DB", 0),
+			ContextCacheTTL:    getEnvAsInt("REDIS_CONTEXT_CACHE_TTL", 1800), // 30 minutes default
+			EnableContextCache: getEnvAsBool("REDIS_ENABLE_CONTEXT_CACHE", true),
 		},
 	}
 

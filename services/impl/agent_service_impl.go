@@ -36,23 +36,53 @@ func (s *agentServiceImpl) CreateAgent(ctx context.Context, req models.CreateAge
 		agentType = models.AgentTypeConversational
 	}
 
+	// Default EnableKnowledge to true if not explicitly set
+	// Since bool defaults to false, we check if notebooks are provided as a hint
+	enableKnowledge := req.EnableKnowledge
+	if !enableKnowledge && len(req.NotebookIDs) > 0 {
+		enableKnowledge = true
+	}
+
+	// Default EnableMemory to true for conversational agents
+	enableMemory := req.EnableMemory
+	if !enableMemory && agentType == models.AgentTypeConversational {
+		enableMemory = true
+	}
+
 	agent := &models.Agent{
-		ID:           uuid.New(),
-		Name:         req.Name,
-		Description:  req.Description,
-		SystemPrompt: req.SystemPrompt,
-		LLMConfig:    req.LLMConfig,
-		OwnerID:      ownerID,
-		SpaceID:      req.SpaceID,
-		SpaceType:    spaceType,
-		Type:         agentType,
-		TenantID:     tenantID,
-		Status:       models.AgentStatusDraft,
-		IsPublic:     req.IsPublic,
-		IsTemplate:   req.IsTemplate,
-		IsInternal:   req.IsInternal,
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		ID:              uuid.New(),
+		Name:            req.Name,
+		Description:     req.Description,
+		SystemPrompt:    req.SystemPrompt,
+		LLMConfig:       req.LLMConfig,
+		OwnerID:         ownerID,
+		SpaceID:         req.SpaceID,
+		SpaceType:       spaceType,
+		Type:            agentType,
+		TenantID:        tenantID,
+		Status:          models.AgentStatusDraft,
+		IsPublic:        req.IsPublic,
+		IsTemplate:      req.IsTemplate,
+		IsInternal:      req.IsInternal,
+		EnableKnowledge: enableKnowledge,
+		EnableMemory:    enableMemory,
+		DocumentContext: req.DocumentContext,
+		CreatedAt:       time.Now(),
+		UpdatedAt:       time.Now(),
+	}
+
+	// Set default document context if knowledge is enabled but no config provided
+	if enableKnowledge && agent.DocumentContext == nil {
+		agent.DocumentContext = &models.DocumentContextConfig{
+			Strategy:            models.ContextStrategyVector,
+			Scope:               models.DocumentScopeAll,
+			IncludeSubNotebooks: false,
+			MaxContextTokens:    8000,
+			TopK:                10,
+			MinScore:            0.7,
+			VectorWeight:        0.5,
+			FullDocWeight:       0.5,
+		}
 	}
 
 	if len(req.NotebookIDs) > 0 {
@@ -110,16 +140,17 @@ func (s *agentServiceImpl) GetAgentByOwner(ctx context.Context, id uuid.UUID, ow
 
 func (s *agentServiceImpl) UpdateAgent(ctx context.Context, id uuid.UUID, req models.UpdateAgentRequest, ownerID string) (*models.Agent, error) {
 	var agent models.Agent
-	
-	if err := s.db.WithContext(ctx).Where("id = ? AND owner_id = ?", id, ownerID).First(&agent).Error; err != nil {
+
+	// Allow updates if user owns the agent OR if agent is internal/public (for system agents)
+	if err := s.db.WithContext(ctx).Where("id = ? AND (owner_id = ? OR is_internal = true OR is_public = true)", id, ownerID).First(&agent).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("agent not found")
 		}
 		return nil, fmt.Errorf("failed to find agent: %w", err)
 	}
 
-	updates := make(map[string]interface{})
-	
+	updates := make(map[string]any)
+
 	if req.Name != nil {
 		updates["name"] = *req.Name
 	}
@@ -147,7 +178,18 @@ func (s *agentServiceImpl) UpdateAgent(ctx context.Context, id uuid.UUID, req mo
 	if req.IsInternal != nil {
 		updates["is_internal"] = *req.IsInternal
 	}
-	
+
+	// Knowledge configuration updates
+	if req.EnableKnowledge != nil {
+		updates["enable_knowledge"] = *req.EnableKnowledge
+	}
+	if req.EnableMemory != nil {
+		updates["enable_memory"] = *req.EnableMemory
+	}
+	if req.DocumentContext != nil {
+		updates["document_context"] = req.DocumentContext
+	}
+
 	if req.NotebookIDs != nil {
 		notebookJSON, err := models.ConvertToJSON(req.NotebookIDs)
 		if err != nil {
@@ -155,7 +197,7 @@ func (s *agentServiceImpl) UpdateAgent(ctx context.Context, id uuid.UUID, req mo
 		}
 		updates["notebook_ids"] = notebookJSON
 	}
-	
+
 	if req.Tags != nil {
 		tagsJSON, err := models.ConvertToJSON(req.Tags)
 		if err != nil {
@@ -163,11 +205,16 @@ func (s *agentServiceImpl) UpdateAgent(ctx context.Context, id uuid.UUID, req mo
 		}
 		updates["tags"] = tagsJSON
 	}
-	
+
 	updates["updated_at"] = time.Now()
 
 	if err := s.db.WithContext(ctx).Model(&agent).Updates(updates).Error; err != nil {
 		return nil, fmt.Errorf("failed to update agent: %w", err)
+	}
+
+	// Reload the agent to get updated values
+	if err := s.db.WithContext(ctx).First(&agent, id).Error; err != nil {
+		return nil, fmt.Errorf("failed to reload agent: %w", err)
 	}
 
 	return &agent, nil
@@ -249,16 +296,11 @@ func (s *agentServiceImpl) ListAgents(ctx context.Context, filter models.AgentLi
 		return nil, fmt.Errorf("failed to count agents: %w", err)
 	}
 	
-	page := filter.Page
-	if page < 1 {
-		page = 1
-	}
-	size := filter.Size
-	if size < 1 {
+	page := max(filter.Page, 1)
+	size := max(filter.Size, 1)
+	size = min(size, 100)
+	if filter.Size < 1 {
 		size = 20
-	}
-	if size > 100 {
-		size = 100
 	}
 	
 	offset := (page - 1) * size
@@ -279,7 +321,7 @@ func (s *agentServiceImpl) ListAgents(ctx context.Context, filter models.AgentLi
 func (s *agentServiceImpl) PublishAgent(ctx context.Context, id uuid.UUID, ownerID string) error {
 	result := s.db.WithContext(ctx).Model(&models.Agent{}).
 		Where("id = ? AND owner_id = ?", id, ownerID).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"status":     models.AgentStatusPublished,
 			"updated_at": time.Now(),
 		})
@@ -298,7 +340,7 @@ func (s *agentServiceImpl) PublishAgent(ctx context.Context, id uuid.UUID, owner
 func (s *agentServiceImpl) UnpublishAgent(ctx context.Context, id uuid.UUID, ownerID string) error {
 	result := s.db.WithContext(ctx).Model(&models.Agent{}).
 		Where("id = ? AND owner_id = ?", id, ownerID).
-		Updates(map[string]interface{}{
+		Updates(map[string]any{
 			"status":     models.AgentStatusDraft,
 			"updated_at": time.Now(),
 		})

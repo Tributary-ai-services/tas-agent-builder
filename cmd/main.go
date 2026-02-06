@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"github.com/tas-agent-builder/auth"
@@ -19,6 +20,7 @@ import (
 	"github.com/tas-agent-builder/handlers"
 	"github.com/tas-agent-builder/models"
 	"github.com/tas-agent-builder/services/impl"
+	"github.com/tas-agent-builder/services/memory"
 )
 
 func main() {
@@ -48,8 +50,55 @@ func main() {
 	routerService := impl.NewRouterService(&cfg.Router)
 	executionService := impl.NewExecutionService(db, routerService)
 
+	// Initialize cache service
+	cacheService, err := impl.NewCacheService(&cfg.Redis)
+	if err != nil {
+		log.Printf("Warning: Cache service initialization failed, continuing without caching: %v", err)
+		cacheService, _ = impl.NewCacheService(nil) // Disabled cache fallback
+	}
+
+	// Initialize document context service
+	documentContextService := impl.NewDocumentContextService(
+		&cfg.DeepLake,
+		&cfg.AudiModal,
+		&cfg.Aether,
+		cacheService,
+	)
+
+	// Initialize Redis client for memory service
+	var redisClient *redis.Client
+	var memoryService *memory.MemoryServiceImpl
+	if cfg.Redis.Host != "" {
+		redisClient = redis.NewClient(&redis.Options{
+			Addr:     fmt.Sprintf("%s:%d", cfg.Redis.Host, cfg.Redis.Port),
+			Password: cfg.Redis.Password,
+			DB:       cfg.Redis.DB,
+		})
+		// Test Redis connection
+		_, err := redisClient.Ping(context.Background()).Result()
+		if err != nil {
+			log.Printf("Warning: Redis connection failed, memory service will be disabled: %v", err)
+			redisClient = nil
+		} else {
+			log.Println("Redis connection established for memory service")
+		}
+	}
+
+	// Initialize memory service if Redis is available
+	if redisClient != nil {
+		memoryService = memory.NewMemoryService(
+			redisClient,
+			&cfg.DeepLake,
+			&cfg.Router,
+			nil, // Use default memory config
+		)
+		log.Println("Memory service initialized with 3-tier memory system")
+	} else {
+		log.Println("Memory service disabled (no Redis connection)")
+	}
+
 	// Initialize handlers
-	agentHandlers := handlers.NewAgentHandlers(agentService, routerService, executionService)
+	agentHandlers := handlers.NewAgentHandlers(agentService, routerService, executionService, documentContextService, cacheService, memoryService)
 	routerProxy := handlers.NewRouterProxyHandler(cfg.Router.BaseURL)
 	
 	// Setup router

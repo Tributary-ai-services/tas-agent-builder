@@ -17,8 +17,9 @@ import (
 )
 
 type routerServiceImpl struct {
-	config     *config.RouterConfig
-	httpClient *http.Client
+	config           *config.RouterConfig
+	httpClient       *http.Client
+	modelLimitsCache map[string]int // Cache for model max_output_tokens
 }
 
 func NewRouterService(cfg *config.RouterConfig) services.RouterService {
@@ -27,16 +28,20 @@ func NewRouterService(cfg *config.RouterConfig) services.RouterService {
 		httpClient: &http.Client{
 			Timeout: time.Duration(cfg.Timeout) * time.Second,
 		},
+		modelLimitsCache: make(map[string]int),
 	}
 }
 
 func (s *routerServiceImpl) SendRequest(ctx context.Context, agentConfig models.AgentLLMConfig, messages []services.Message, userID uuid.UUID) (*services.RouterResponse, error) {
+	// Cap max_tokens to model-specific limits from router to prevent API errors
+	maxTokens := s.capMaxTokensForModel(ctx, agentConfig.MaxTokens, agentConfig.Model)
+
 	// Build router request
 	request := RouterRequest{
 		Model:            agentConfig.Model,
 		Messages:         make([]RouterMessage, len(messages)),
 		Temperature:      agentConfig.Temperature,
-		MaxTokens:        agentConfig.MaxTokens,
+		MaxTokens:        maxTokens,
 		TopP:             agentConfig.TopP,
 		Stop:             agentConfig.Stop,
 		OptimizeFor:      "cost", // Default optimization
@@ -392,6 +397,29 @@ type ModelInfo struct {
 	Features    []string `json:"features"`
 }
 
+// ActualProviderResponse matches the real LLM router /v1/providers/{provider} response
+type ActualProviderResponse struct {
+	Name         string               `json:"name"`
+	Provider     string               `json:"provider"`
+	Capabilities ProviderCapabilities `json:"capabilities"`
+}
+
+type ProviderCapabilities struct {
+	ProviderName     string              `json:"provider_name"`
+	SupportedModels  []SupportedModel    `json:"supported_models"`
+	MaxContextWindow int                 `json:"max_context_window"`
+}
+
+type SupportedModel struct {
+	Name            string  `json:"name"`
+	DisplayName     string  `json:"display_name"`
+	MaxContextWindow int    `json:"max_context_window"`
+	MaxOutputTokens int     `json:"max_output_tokens"`
+	InputCostPer1K  float64 `json:"input_cost_per_1k"`
+	OutputCostPer1K float64 `json:"output_cost_per_1k"`
+	ProviderModelID string  `json:"provider_model_id"`
+}
+
 // Helper functions
 func capitalizeFirst(s string) string {
 	if len(s) == 0 {
@@ -531,4 +559,75 @@ func calculateCostUSD(usage RouterUsage, model string) float64 {
 	default:
 		return 0.0
 	}
+}
+
+// getModelMaxOutputTokens fetches the max output tokens for a model from the LLM router
+// Uses a cache to avoid repeated API calls
+func (s *routerServiceImpl) getModelMaxOutputTokens(ctx context.Context, model string) int {
+	// Check cache first
+	if limit, ok := s.modelLimitsCache[model]; ok {
+		return limit
+	}
+
+	// Determine provider from model name
+	provider := extractProvider(model)
+	if provider == "unknown" {
+		return 4096 // Safe default
+	}
+
+	// Fetch from router
+	url := fmt.Sprintf("%s/v1/providers/%s", s.config.BaseURL, provider)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return 4096 // Safe default on error
+	}
+
+	if s.config.APIKey != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.config.APIKey))
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return 4096 // Safe default on error
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 4096 // Safe default on error
+	}
+
+	var providerResp ActualProviderResponse
+	if err := json.NewDecoder(resp.Body).Decode(&providerResp); err != nil {
+		return 4096 // Safe default on error
+	}
+
+	// Find the model in supported models and cache all models from this provider
+	for _, m := range providerResp.Capabilities.SupportedModels {
+		if m.MaxOutputTokens > 0 {
+			s.modelLimitsCache[m.Name] = m.MaxOutputTokens
+		}
+	}
+
+	// Return the limit for the requested model
+	if limit, ok := s.modelLimitsCache[model]; ok {
+		return limit
+	}
+
+	// Model not found in provider response
+	return 4096
+}
+
+// capMaxTokensForModel caps max_tokens to the model's maximum output token limit from the router
+func (s *routerServiceImpl) capMaxTokensForModel(ctx context.Context, maxTokens *int, model string) *int {
+	if maxTokens == nil {
+		return nil
+	}
+
+	modelLimit := s.getModelMaxOutputTokens(ctx, model)
+	if *maxTokens > modelLimit {
+		capped := modelLimit
+		return &capped
+	}
+
+	return maxTokens
 }

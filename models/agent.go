@@ -160,19 +160,79 @@ func floatPtr(f float64) *float64 {
 	return &f
 }
 
+// ContextStrategy defines how documents are retrieved and injected into agent context
+type ContextStrategy string
+
+const (
+	ContextStrategyVector ContextStrategy = "vector" // Vector search RAG (default for Q&A/Conversational)
+	ContextStrategyFull   ContextStrategy = "full"   // Full document injection (for Producer agents)
+	ContextStrategyHybrid ContextStrategy = "hybrid" // Combined vector + full document sections
+	ContextStrategyMCP    ContextStrategy = "mcp"    // MCP server integration for autonomous retrieval
+	ContextStrategyNone   ContextStrategy = "none"   // No document context
+)
+
+// DocumentScope defines which documents to include in context
+type DocumentScope string
+
+const (
+	DocumentScopeAll      DocumentScope = "all"      // All documents in notebook(s)
+	DocumentScopeSelected DocumentScope = "selected" // Only selected documents
+	DocumentScopeNone     DocumentScope = "none"     // No documents
+)
+
+// MultiPassConfig defines configuration for multi-pass document processing
+type MultiPassConfig struct {
+	Enabled           bool   `json:"enabled" gorm:"default:false"`
+	SegmentSize       int    `json:"segment_size" gorm:"default:8000"`         // Tokens per segment
+	OverlapTokens     int    `json:"overlap_tokens" gorm:"default:500"`        // Overlap between segments
+	MaxPasses         int    `json:"max_passes" gorm:"default:10"`             // Maximum segments to process
+	AggregationPrompt string `json:"aggregation_prompt,omitempty"`             // Custom prompt for aggregation
+}
+
+// DocumentContextConfig holds all document context settings for an agent
+type DocumentContextConfig struct {
+	Strategy            ContextStrategy  `json:"strategy" gorm:"default:'vector'"`
+	Scope               DocumentScope    `json:"scope" gorm:"default:'all'"`
+	DefaultDocuments    []uuid.UUID      `json:"default_documents,omitempty"`
+	IncludeSubNotebooks bool             `json:"include_sub_notebooks" gorm:"default:false"`
+	MaxContextTokens    int              `json:"max_context_tokens" gorm:"default:8000"`
+	TopK                int              `json:"top_k" gorm:"default:10"`           // For vector search
+	MinScore            float64          `json:"min_score" gorm:"default:0.7"`      // Minimum similarity score
+	VectorWeight        float64          `json:"vector_weight" gorm:"default:0.5"`  // For hybrid search
+	FullDocWeight       float64          `json:"full_doc_weight" gorm:"default:0.5"` // For hybrid search
+	MultiPass           *MultiPassConfig `json:"multi_pass,omitempty"`
+}
+
+func (c DocumentContextConfig) Value() (driver.Value, error) {
+	return json.Marshal(c)
+}
+
+func (c *DocumentContextConfig) Scan(value interface{}) error {
+	if value == nil {
+		return nil
+	}
+
+	bytes, ok := value.([]byte)
+	if !ok {
+		return json.Unmarshal([]byte(value.(string)), c)
+	}
+
+	return json.Unmarshal(bytes, c)
+}
+
 type Agent struct {
 	ID          uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
 	Name        string     `json:"name" gorm:"not null"`
 	Description string     `json:"description"`
-	
+
 	SystemPrompt string `json:"system_prompt" gorm:"not null"`
-	
+
 	LLMConfig AgentLLMConfig `json:"llm_config" gorm:"type:jsonb;not null"`
-	
+
 	OwnerID  string `json:"owner_id" gorm:"type:varchar(255);not null"`
 	SpaceID  string `json:"space_id" gorm:"type:varchar(255);not null"`
 	TenantID string `json:"tenant_id" gorm:"type:varchar(255);not null"`
-	
+
 	Status    AgentStatus `json:"status" gorm:"type:varchar(50);not null;default:'draft'"`
 	SpaceType SpaceType   `json:"space_type" gorm:"type:varchar(50);not null"`
 	Type      AgentType   `json:"type" gorm:"type:varchar(50);not null;default:'conversational'"`
@@ -180,16 +240,21 @@ type Agent struct {
 	IsPublic   bool `json:"is_public" gorm:"default:false"`
 	IsTemplate bool `json:"is_template" gorm:"default:false"`
 	IsInternal bool `json:"is_internal" gorm:"default:false"` // System agents available to all users
-	
+
 	NotebookIDs datatypes.JSON `json:"notebook_ids" gorm:"type:jsonb;default:'[]'"`
-	
+
+	// Document Context Configuration
+	EnableKnowledge     bool                   `json:"enable_knowledge" gorm:"default:true"`
+	EnableMemory        bool                   `json:"enable_memory" gorm:"default:true"`
+	DocumentContext     *DocumentContextConfig `json:"document_context,omitempty" gorm:"type:jsonb"`
+
 	Tags datatypes.JSON `json:"tags" gorm:"type:jsonb;default:'[]'"`
-	
+
 	TotalExecutions     int     `json:"total_executions" gorm:"default:0"`
 	TotalCostUSD        float64 `json:"total_cost_usd" gorm:"type:decimal(10,6);default:0"`
 	AvgResponseTimeMs   int     `json:"avg_response_time_ms" gorm:"default:0"`
 	LastExecutedAt      *time.Time `json:"last_executed_at"`
-	
+
 	CreatedAt time.Time  `json:"created_at" gorm:"not null;default:now()"`
 	UpdatedAt time.Time  `json:"updated_at" gorm:"not null;default:now()"`
 	DeletedAt *time.Time `json:"deleted_at,omitempty" gorm:"index"`
@@ -212,6 +277,11 @@ type CreateAgentRequest struct {
 	IsInternal   bool           `json:"is_internal"` // System agents - only settable by system
 	NotebookIDs  []uuid.UUID    `json:"notebook_ids"`
 	Tags         []string       `json:"tags"`
+
+	// Document Context Configuration
+	EnableKnowledge bool                   `json:"enable_knowledge"`
+	EnableMemory    bool                   `json:"enable_memory"`
+	DocumentContext *DocumentContextConfig `json:"document_context,omitempty"`
 }
 
 type UpdateAgentRequest struct {
@@ -226,6 +296,11 @@ type UpdateAgentRequest struct {
 	IsInternal   *bool           `json:"is_internal,omitempty"` // System agents - only settable by system
 	NotebookIDs  []uuid.UUID     `json:"notebook_ids,omitempty"`
 	Tags         []string        `json:"tags,omitempty"`
+
+	// Document Context Configuration
+	EnableKnowledge *bool                  `json:"enable_knowledge,omitempty"`
+	EnableMemory    *bool                  `json:"enable_memory,omitempty"`
+	DocumentContext *DocumentContextConfig `json:"document_context,omitempty"`
 }
 
 type AgentListResponse struct {
