@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -185,6 +186,224 @@ func (s *routerServiceImpl) SendRequest(ctx context.Context, agentConfig models.
 	return nil, fmt.Errorf("unexpected error in router request")
 }
 
+func (s *routerServiceImpl) SendRequestWithTools(ctx context.Context, agentConfig models.AgentLLMConfig, messages []services.Message, tools []services.ToolDefinition, toolChoice string, userID uuid.UUID) (*services.RouterResponse, error) {
+	// Cap max_tokens to model-specific limits
+	maxTokens := s.capMaxTokensForModel(ctx, agentConfig.MaxTokens, agentConfig.Model)
+
+	// Build router request with tools
+	request := RouterRequest{
+		Model:            agentConfig.Model,
+		Messages:         make([]RouterMessage, len(messages)),
+		Temperature:      agentConfig.Temperature,
+		MaxTokens:        maxTokens,
+		TopP:             agentConfig.TopP,
+		Stop:             agentConfig.Stop,
+		OptimizeFor:      "cost",
+		RequiredFeatures: agentConfig.RequiredFeatures,
+		MaxCost:          agentConfig.MaxCost,
+		RetryConfig:      buildRetryConfig(agentConfig.RetryConfig),
+		FallbackConfig:   buildFallbackConfig(agentConfig.FallbackConfig),
+	}
+
+	// Convert messages including tool call fields
+	for i, msg := range messages {
+		rm := RouterMessage{
+			Role:       msg.Role,
+			Content:    msg.Content,
+			ToolCallID: msg.ToolCallID,
+		}
+		// Convert tool calls
+		if len(msg.ToolCalls) > 0 {
+			rm.ToolCalls = make([]RouterToolCall, len(msg.ToolCalls))
+			for j, tc := range msg.ToolCalls {
+				rm.ToolCalls[j] = RouterToolCall{
+					ID:   tc.ID,
+					Type: tc.Type,
+					Function: RouterToolCallFunction{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
+				}
+			}
+		}
+		request.Messages[i] = rm
+	}
+
+	// Convert tool definitions
+	if len(tools) > 0 {
+		request.Tools = make([]RouterTool, len(tools))
+		for i, t := range tools {
+			request.Tools[i] = RouterTool{
+				Type: t.Type,
+				Function: RouterToolFunction{
+					Name:        t.Function.Name,
+					Description: t.Function.Description,
+					Parameters:  t.Function.Parameters,
+				},
+			}
+		}
+		if toolChoice != "" {
+			request.ToolChoice = toolChoice
+		} else {
+			request.ToolChoice = "auto"
+		}
+	}
+
+	// Add metadata if present
+	if agentConfig.Metadata != nil {
+		if optimize, ok := agentConfig.Metadata["optimize_for"].(string); ok {
+			request.OptimizeFor = optimize
+		}
+	}
+	if agentConfig.OptimizeFor != "" {
+		request.OptimizeFor = agentConfig.OptimizeFor
+	}
+
+	// Marshal request
+	jsonData, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal router request: %w", err)
+	}
+
+	// Debug: log the request tools and tool_choice being sent
+	if len(request.Tools) > 0 {
+		log.Printf("[MCP-TOOLS-DEBUG] Sending to router: model=%s, tool_choice=%s, tools=%d, messages=%d",
+			request.Model, request.ToolChoice, len(request.Tools), len(request.Messages))
+		for i, t := range request.Tools {
+			log.Printf("[MCP-TOOLS-DEBUG]   tool[%d]: type=%s name=%s", i, t.Type, t.Function.Name)
+		}
+	}
+
+	// Create HTTP request
+	url := fmt.Sprintf("%s/v1/chat/completions", s.config.BaseURL)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if s.config.APIKey != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.config.APIKey))
+	}
+	req.Header.Set("X-User-ID", userID.String())
+
+	// Send request with retries
+	var resp *http.Response
+	var lastErr error
+
+	for attempt := 0; attempt <= s.config.MaxRetries; attempt++ {
+		startTime := time.Now()
+		resp, err = s.httpClient.Do(req)
+		responseTime := time.Since(startTime)
+
+		if err != nil {
+			lastErr = err
+			if attempt < s.config.MaxRetries {
+				time.Sleep(time.Duration(attempt+1) * time.Second)
+				continue
+			}
+			break
+		}
+
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response body: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			if attempt < s.config.MaxRetries && (resp.StatusCode == 429 || resp.StatusCode >= 500) {
+				time.Sleep(time.Duration(attempt+1) * time.Second)
+				continue
+			}
+			return nil, fmt.Errorf("router returned status %d: %s", resp.StatusCode, string(body))
+		}
+
+		// Parse response
+		var routerResp RouterAPIResponse
+		if err := json.Unmarshal(body, &routerResp); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal router response: %w", err)
+		}
+
+		// Debug: log raw response details for tool-call debugging
+		if len(request.Tools) > 0 {
+			log.Printf("[MCP-TOOLS-DEBUG] Router response model=%s, choices=%d", routerResp.Model, len(routerResp.Choices))
+			if len(routerResp.Choices) > 0 {
+				c0 := routerResp.Choices[0]
+				log.Printf("[MCP-TOOLS-DEBUG] Choice[0] finish_reason=%s, tool_calls=%d, content_len=%d",
+					c0.FinishReason, len(c0.Message.ToolCalls), len(c0.Message.Content))
+				if len(c0.Message.ToolCalls) > 0 {
+					for i, tc := range c0.Message.ToolCalls {
+						log.Printf("[MCP-TOOLS-DEBUG]   tool_call[%d]: id=%s name=%s", i, tc.ID, tc.Function.Name)
+					}
+				}
+			}
+			// Log raw body snippet for troubleshooting
+			bodyStr := string(body)
+			if len(bodyStr) > 1000 {
+				bodyStr = bodyStr[:1000] + "..."
+			}
+			log.Printf("[MCP-TOOLS-DEBUG] Raw response body: %s", bodyStr)
+		}
+
+		if len(routerResp.Choices) == 0 {
+			return nil, fmt.Errorf("no choices in router response")
+		}
+
+		choice := routerResp.Choices[0]
+
+		// Extract provider
+		provider := extractProvider(routerResp.Model)
+		if routerResp.RouterMetadata != nil {
+			if metaProvider, ok := routerResp.RouterMetadata["provider"].(string); ok {
+				provider = metaProvider
+			}
+		}
+
+		response := &services.RouterResponse{
+			Content:         choice.Message.Content,
+			Provider:        provider,
+			Model:           routerResp.Model,
+			RoutingStrategy: request.OptimizeFor,
+			TokenUsage:      routerResp.Usage.TotalTokens,
+			CostUSD:         calculateCostUSD(routerResp.Usage, routerResp.Model),
+			ResponseTimeMs:  int(responseTime.Milliseconds()),
+			FinishReason:    choice.FinishReason,
+			Metadata: map[string]interface{}{
+				"request_id":        routerResp.ID,
+				"finish_reason":     choice.FinishReason,
+				"prompt_tokens":     routerResp.Usage.PromptTokens,
+				"completion_tokens": routerResp.Usage.CompletionTokens,
+				"created":           routerResp.Created,
+			},
+		}
+
+		// Extract tool calls from response
+		if len(choice.Message.ToolCalls) > 0 {
+			response.ToolCalls = make([]services.ToolCall, len(choice.Message.ToolCalls))
+			for i, tc := range choice.Message.ToolCalls {
+				response.ToolCalls[i] = services.ToolCall{
+					ID:   tc.ID,
+					Type: tc.Type,
+					Function: services.ToolFunction{
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					},
+				}
+			}
+		}
+
+		return response, nil
+	}
+
+	if lastErr != nil {
+		return nil, fmt.Errorf("failed after %d retries: %w", s.config.MaxRetries, lastErr)
+	}
+
+	return nil, fmt.Errorf("unexpected error in router request")
+}
+
 func (s *routerServiceImpl) ValidateConfig(ctx context.Context, config models.AgentLLMConfig) error {
 	if config.Provider == "" {
 		return fmt.Errorf("provider is required")
@@ -319,6 +538,8 @@ type RouterRequest struct {
 	MaxCost          *float64        `json:"max_cost,omitempty"`
 	RetryConfig      *RetryConfig    `json:"retry_config,omitempty"`
 	FallbackConfig   *FallbackConfig `json:"fallback_config,omitempty"`
+	Tools            []RouterTool    `json:"tools,omitempty"`
+	ToolChoice       interface{}     `json:"tool_choice,omitempty"`
 }
 
 // RetryConfig defines retry behavior for failed requests
@@ -340,8 +561,36 @@ type FallbackConfig struct {
 }
 
 type RouterMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string            `json:"role"`
+	Content    string            `json:"content"`
+	ToolCallID string            `json:"tool_call_id,omitempty"`
+	ToolCalls  []RouterToolCall  `json:"tool_calls,omitempty"`
+}
+
+// RouterTool represents a tool definition sent to the LLM router
+type RouterTool struct {
+	Type     string             `json:"type"` // "function"
+	Function RouterToolFunction `json:"function"`
+}
+
+// RouterToolFunction defines a callable function for the LLM
+type RouterToolFunction struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	Parameters  interface{} `json:"parameters"` // JSON Schema
+}
+
+// RouterToolCall represents a tool call in the router response
+type RouterToolCall struct {
+	ID       string                 `json:"id"`
+	Type     string                 `json:"type"`
+	Function RouterToolCallFunction `json:"function"`
+}
+
+// RouterToolCallFunction contains the function name and arguments from a tool call
+type RouterToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 type RouterAPIResponse struct {

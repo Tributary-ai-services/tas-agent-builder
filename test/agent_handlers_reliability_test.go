@@ -100,7 +100,7 @@ func TestAgentHandlersReliabilityFeatures(t *testing.T) {
 	mockAgentService := new(MockAgentService)
 	mockRouterService := new(MockRouterService)
 	
-	h := handlers.NewAgentHandlers(mockAgentService, mockRouterService)
+	h := handlers.NewAgentHandlers(mockAgentService, mockRouterService, nil, nil, nil, nil, nil, nil, false, 10)
 
 	t.Run("CreateAgent with reliability configuration validation", func(t *testing.T) {
 		// Setup mocks
@@ -411,7 +411,7 @@ func TestRetryConfigValidationInHandler(t *testing.T) {
 			mockAgentService := new(MockAgentService)
 			mockRouterService := new(MockRouterService)
 			
-			h := handlers.NewAgentHandlers(mockAgentService, mockRouterService)
+			h := handlers.NewAgentHandlers(mockAgentService, mockRouterService, nil, nil, nil, nil, nil, nil, false, 10)
 
 			// Only setup router validation mock if config should be valid
 			if tt.expectValid {
@@ -501,7 +501,7 @@ func TestFallbackConfigValidationInHandler(t *testing.T) {
 			mockAgentService := new(MockAgentService)
 			mockRouterService := new(MockRouterService)
 			
-			h := handlers.NewAgentHandlers(mockAgentService, mockRouterService)
+			h := handlers.NewAgentHandlers(mockAgentService, mockRouterService, nil, nil, nil, nil, nil, nil, false, 10)
 
 			if tt.expectValid {
 				mockRouterService.On("ValidateConfig", mock.Anything, mock.AnythingOfType("models.AgentLLMConfig")).Return(nil)

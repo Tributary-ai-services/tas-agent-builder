@@ -24,6 +24,10 @@ type AgentHandlers struct {
 	documentContextService services.DocumentContextService
 	cacheService           services.CacheService
 	memoryService          *memory.MemoryServiceImpl
+	mcpContextService      services.MCPContextService
+	skillService           services.SkillService
+	mcpEnabled             bool
+	mcpMaxToolIterations   int
 }
 
 func NewAgentHandlers(
@@ -33,6 +37,10 @@ func NewAgentHandlers(
 	documentContextService services.DocumentContextService,
 	cacheService services.CacheService,
 	memoryService *memory.MemoryServiceImpl,
+	mcpContextService services.MCPContextService,
+	skillService services.SkillService,
+	mcpEnabled bool,
+	mcpMaxToolIterations int,
 ) *AgentHandlers {
 	return &AgentHandlers{
 		agentService:           agentService,
@@ -41,6 +49,10 @@ func NewAgentHandlers(
 		documentContextService: documentContextService,
 		cacheService:           cacheService,
 		memoryService:          memoryService,
+		mcpContextService:      mcpContextService,
+		skillService:           skillService,
+		mcpEnabled:             mcpEnabled,
+		mcpMaxToolIterations:   mcpMaxToolIterations,
 	}
 }
 
@@ -608,8 +620,18 @@ func (h *AgentHandlers) ExecuteInternalAgent(c *gin.Context) {
 	}
 	log.Printf("[DEBUG] === END INTERNAL AGENT MESSAGES DEBUG ===")
 
-	// Call router service
-	response, err := h.routerService.SendRequest(c.Request.Context(), agent.LLMConfig, messages, userUUID)
+	// Check if agent uses MCP strategy, has skills, and MCP is enabled
+	useMCPTools := h.mcpEnabled && h.mcpContextService != nil &&
+		(h.getContextStrategy(agent) == models.ContextStrategyMCP || h.agentHasSkills(agent))
+
+	var response *services.RouterResponse
+
+	if useMCPTools {
+		log.Printf("[MCP-TOOLS] Internal agent %s uses MCP/skills, executing with tool loop", agentID)
+		response, err = h.executeWithToolLoop(c.Request.Context(), agent, messages, userUUID)
+	} else {
+		response, err = h.routerService.SendRequest(c.Request.Context(), agent.LLMConfig, messages, userUUID)
+	}
 
 	// Calculate total duration
 	totalDuration := int(time.Since(startTime).Milliseconds())
@@ -633,6 +655,7 @@ func (h *AgentHandlers) ExecuteInternalAgent(c *gin.Context) {
 			"routing_strategy": response.RoutingStrategy,
 			"response_time_ms": response.ResponseTimeMs,
 			"total_time_ms":    totalDuration,
+			"mcp_tools_used":   useMCPTools,
 		},
 		"context_metadata": contextMetadata,
 	}
@@ -1090,8 +1113,20 @@ func (h *AgentHandlers) ExecuteAgent(c *gin.Context) {
 	}
 	log.Printf("[DEBUG] === END MESSAGES DEBUG ===")
 
-	// Call router service
-	response, err := h.routerService.SendRequest(c.Request.Context(), agent.LLMConfig, messages, userUUID)
+	// Check if agent uses MCP strategy, has skills, and MCP is enabled
+	useMCPTools := h.mcpEnabled && h.mcpContextService != nil &&
+		(h.getContextStrategy(agent) == models.ContextStrategyMCP || h.agentHasSkills(agent))
+
+	var response *services.RouterResponse
+
+	if useMCPTools {
+		// Execute with MCP tool loop
+		log.Printf("[MCP-TOOLS] Agent %s uses MCP/skills, executing with tool loop", agentID)
+		response, err = h.executeWithToolLoop(c.Request.Context(), agent, messages, userUUID)
+	} else {
+		// Standard execution without tools
+		response, err = h.routerService.SendRequest(c.Request.Context(), agent.LLMConfig, messages, userUUID)
+	}
 
 	// Calculate total duration
 	totalDuration := int(time.Since(startTime).Milliseconds())
@@ -1116,6 +1151,9 @@ func (h *AgentHandlers) ExecuteAgent(c *gin.Context) {
 		"routing_strategy": response.RoutingStrategy,
 		"response_time_ms": response.ResponseTimeMs,
 		"context_metadata": contextMetadata,
+	}
+	if useMCPTools {
+		outputData["mcp_tools_used"] = true
 	}
 
 	if execution != nil {
@@ -1177,6 +1215,7 @@ func (h *AgentHandlers) ExecuteAgent(c *gin.Context) {
 			"routing_strategy": response.RoutingStrategy,
 			"response_time_ms": response.ResponseTimeMs,
 			"context_metadata": contextMetadata,
+			"mcp_tools_used":   useMCPTools,
 		},
 	}
 
@@ -1462,5 +1501,335 @@ func (h *AgentHandlers) retrieveHybridContext(ctx context.Context, agent *models
 	}
 
 	return h.documentContextService.RetrieveHybridContext(ctx, req.Input, chunkReq, vectorWeight, fullDocWeight)
+}
+
+// agentHasSkills checks if an agent has any skills assigned
+func (h *AgentHandlers) agentHasSkills(agent *models.Agent) bool {
+	if agent.Skills == nil {
+		return false
+	}
+	var skills []string
+	if err := json.Unmarshal(agent.Skills, &skills); err != nil {
+		return false
+	}
+	return len(skills) > 0
+}
+
+// resolveToolsForAgent resolves tools from an agent's skills and returns tool definitions
+// along with a map of tool name → server URL for invocation routing
+func (h *AgentHandlers) resolveToolsForAgent(ctx context.Context, agent *models.Agent) ([]services.ToolDefinition, map[string]string, error) {
+	if h.skillService == nil {
+		// No skill service — fall back to default MCP tools
+		tools, err := h.mcpContextService.ListToolsForLLM(ctx)
+		return tools, nil, err
+	}
+
+	skills, err := h.skillService.ResolveForAgent(ctx, agent)
+	if err != nil {
+		log.Printf("[SKILLS] Failed to resolve skills for agent %s: %v", agent.ID, err)
+		// Fall back to default MCP tools
+		tools, err := h.mcpContextService.ListToolsForLLM(ctx)
+		return tools, nil, err
+	}
+
+	if len(skills) == 0 {
+		// No skills — fall back to default MCP tools if using MCP strategy
+		if h.getContextStrategy(agent) == models.ContextStrategyMCP {
+			tools, err := h.mcpContextService.ListToolsForLLM(ctx)
+			return tools, nil, err
+		}
+		return nil, nil, nil
+	}
+
+	var allTools []services.ToolDefinition
+	toolServerMap := make(map[string]string) // tool name → server URL
+	seen := make(map[string]bool)
+
+	for _, skill := range skills {
+		if skill.Type != models.SkillTypeMCP || skill.MCPServerURL == "" {
+			continue
+		}
+
+		log.Printf("[SKILLS] Discovering tools from skill %q (server: %s)", skill.Name, skill.MCPServerURL)
+
+		// Get allowed tool names for this skill
+		var allowedTools []string
+		if skill.MCPToolNames != nil {
+			json.Unmarshal(skill.MCPToolNames, &allowedTools)
+		}
+		allowedSet := make(map[string]bool)
+		for _, t := range allowedTools {
+			allowedSet[t] = true
+		}
+
+		// Discover tools from this skill's MCP server
+		tools, err := h.discoverToolsFromServer(ctx, skill.MCPServerURL)
+		if err != nil {
+			log.Printf("[SKILLS] Failed to discover tools from %s: %v", skill.MCPServerURL, err)
+			continue
+		}
+
+		for _, tool := range tools {
+			// Filter to allowed tools if specified
+			if len(allowedSet) > 0 && !allowedSet[tool.Function.Name] {
+				continue
+			}
+			if !seen[tool.Function.Name] {
+				seen[tool.Function.Name] = true
+				allTools = append(allTools, tool)
+				toolServerMap[tool.Function.Name] = skill.MCPServerURL
+			}
+		}
+	}
+
+	log.Printf("[SKILLS] Resolved %d tools from %d skills", len(allTools), len(skills))
+	return allTools, toolServerMap, nil
+}
+
+// discoverToolsFromServer discovers tools from an MCP server URL
+func (h *AgentHandlers) discoverToolsFromServer(ctx context.Context, serverURL string) ([]services.ToolDefinition, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", serverURL+"/mcp/tools/list", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list tools: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var mcpResp struct {
+		Tools []struct {
+			Name        string      `json:"name"`
+			Description string      `json:"description"`
+			InputSchema interface{} `json:"inputSchema"`
+		} `json:"tools"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&mcpResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	tools := make([]services.ToolDefinition, 0, len(mcpResp.Tools))
+	for _, t := range mcpResp.Tools {
+		params := t.InputSchema
+		if params == nil {
+			params = map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			}
+		}
+		tools = append(tools, services.ToolDefinition{
+			Type: "function",
+			Function: services.ToolFunctionDef{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  params,
+			},
+		})
+	}
+
+	return tools, nil
+}
+
+// invokeToolOnServer invokes a tool on a specific MCP server
+func (h *AgentHandlers) invokeToolOnServer(ctx context.Context, serverURL string, toolName string, args map[string]interface{}) (string, error) {
+	mcpRequest := map[string]interface{}{
+		"name":      toolName,
+		"arguments": args,
+	}
+
+	reqBody, err := json.Marshal(mcpRequest)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", serverURL+"/mcp/tools/call", strings.NewReader(string(reqBody)))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var mcpResp struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&mcpResp); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	var resultText string
+	for _, c := range mcpResp.Content {
+		if c.Type == "text" {
+			resultText = c.Text
+			break
+		}
+	}
+
+	if mcpResp.IsError {
+		return "", fmt.Errorf("tool error: %s", resultText)
+	}
+
+	return resultText, nil
+}
+
+// executeWithToolLoop discovers MCP tools (via skills or default), sends them to the LLM,
+// and loops on tool_calls until the LLM returns a text response or max iterations are reached.
+func (h *AgentHandlers) executeWithToolLoop(ctx context.Context, agent *models.Agent, messages []services.Message, userID uuid.UUID) (*services.RouterResponse, error) {
+	// Resolve tools via skills system
+	tools, toolServerMap, err := h.resolveToolsForAgent(ctx, agent)
+	if err != nil {
+		log.Printf("[MCP-TOOLS] Failed to resolve tools, falling back to standard execution: %v", err)
+		return h.routerService.SendRequest(ctx, agent.LLMConfig, messages, userID)
+	}
+
+	log.Printf("[MCP-TOOLS] Discovered %d tools for LLM", len(tools))
+	for _, t := range tools {
+		log.Printf("[MCP-TOOLS]   - %s: %s", t.Function.Name, t.Function.Description)
+	}
+
+	if len(tools) == 0 {
+		log.Printf("[MCP-TOOLS] No tools available, falling back to standard execution")
+		return h.routerService.SendRequest(ctx, agent.LLMConfig, messages, userID)
+	}
+
+	// Inject tool-usage instruction into the system message so the LLM knows
+	// it has tools available and should use them when the task calls for it.
+	toolNames := make([]string, len(tools))
+	for i, t := range tools {
+		toolNames[i] = t.Function.Name
+	}
+	toolHint := fmt.Sprintf(
+		"\n\n--- AVAILABLE TOOLS ---\nYou have access to the following tools: %s. "+
+			"When your task involves generating visuals, diagrams, charts, or any action that matches a tool's capability, "+
+			"you MUST call the appropriate tool rather than describing what you would do. "+
+			"After calling a tool, include the tool's result (such as download URLs or file paths) in your final response so the user can access it.",
+		strings.Join(toolNames, ", "))
+
+	for i := range messages {
+		if messages[i].Role == "system" {
+			messages[i].Content += toolHint
+			log.Printf("[MCP-TOOLS] Injected tool hint into system message (%d tool names)", len(toolNames))
+			break
+		}
+	}
+
+	maxIterations := h.mcpMaxToolIterations
+	if maxIterations <= 0 {
+		maxIterations = 10
+	}
+
+	var lastResponse *services.RouterResponse
+
+	for iteration := 0; iteration < maxIterations; iteration++ {
+		// First iteration: force tool use so the model doesn't skip tool calls
+		// Subsequent iterations: let the model decide (it may return text after tool results)
+		toolChoice := "auto"
+		if iteration == 0 {
+			toolChoice = "required"
+		}
+		log.Printf("[MCP-TOOLS] Iteration %d/%d, tool_choice=%s, sending %d messages with %d tools", iteration+1, maxIterations, toolChoice, len(messages), len(tools))
+
+		// Send request with tools
+		response, err := h.routerService.SendRequestWithTools(ctx, agent.LLMConfig, messages, tools, toolChoice, userID)
+		if err != nil {
+			return nil, fmt.Errorf("[MCP-TOOLS] iteration %d failed: %w", iteration+1, err)
+		}
+
+		lastResponse = response
+
+		// If no tool calls, the LLM is done — return the response
+		if len(response.ToolCalls) == 0 {
+			log.Printf("[MCP-TOOLS] LLM returned text response after %d iterations (finish_reason=%s)", iteration+1, response.FinishReason)
+			return response, nil
+		}
+
+		log.Printf("[MCP-TOOLS] LLM requested %d tool calls", len(response.ToolCalls))
+
+		// Append the assistant message with tool_calls to conversation
+		assistantMsg := services.Message{
+			Role:      "assistant",
+			Content:   response.Content,
+			ToolCalls: response.ToolCalls,
+		}
+		messages = append(messages, assistantMsg)
+
+		// Execute each tool call and add results as tool messages
+		for _, tc := range response.ToolCalls {
+			log.Printf("[MCP-TOOLS] Executing tool: %s (id=%s)", tc.Function.Name, tc.ID)
+
+			// Parse arguments from JSON string
+			var args map[string]interface{}
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+				log.Printf("[MCP-TOOLS] Failed to parse tool arguments: %v", err)
+				args = make(map[string]interface{})
+			}
+
+			var resultContent string
+
+			// Route tool invocation to the correct MCP server
+			if serverURL, ok := toolServerMap[tc.Function.Name]; ok && serverURL != "" {
+				// Invoke on the specific server for this skill's tool
+				result, err := h.invokeToolOnServer(ctx, serverURL, tc.Function.Name, args)
+				if err != nil {
+					resultContent = fmt.Sprintf("Error invoking tool: %v", err)
+					log.Printf("[MCP-TOOLS] Tool %s error: %v", tc.Function.Name, err)
+				} else {
+					resultContent = result
+					log.Printf("[MCP-TOOLS] Tool %s succeeded, result length: %d", tc.Function.Name, len(resultContent))
+				}
+			} else {
+				// Fall back to default MCP context service
+				toolResp, err := h.mcpContextService.InvokeTool(ctx, models.MCPToolRequest{
+					ToolName:   tc.Function.Name,
+					Parameters: args,
+				})
+
+				if err != nil {
+					resultContent = fmt.Sprintf("Error invoking tool: %v", err)
+					log.Printf("[MCP-TOOLS] Tool %s error: %v", tc.Function.Name, err)
+				} else if !toolResp.Success {
+					resultContent = fmt.Sprintf("Tool error: %s", toolResp.Error)
+					log.Printf("[MCP-TOOLS] Tool %s failed: %s", tc.Function.Name, toolResp.Error)
+				} else {
+					resultBytes, err := json.Marshal(toolResp.Result)
+					if err != nil {
+						resultContent = fmt.Sprintf("%v", toolResp.Result)
+					} else {
+						resultContent = string(resultBytes)
+					}
+					log.Printf("[MCP-TOOLS] Tool %s succeeded in %dms, result length: %d", tc.Function.Name, toolResp.ExecutionMs, len(resultContent))
+				}
+			}
+
+			// Add tool result message
+			toolMsg := services.Message{
+				Role:       "tool",
+				Content:    resultContent,
+				ToolCallID: tc.ID,
+			}
+			messages = append(messages, toolMsg)
+		}
+	}
+
+	// Max iterations reached — return the last response
+	log.Printf("[MCP-TOOLS] Max iterations (%d) reached, returning last response", maxIterations)
+	if lastResponse != nil {
+		return lastResponse, nil
+	}
+	return nil, fmt.Errorf("[MCP-TOOLS] no response after %d iterations", maxIterations)
 }
 

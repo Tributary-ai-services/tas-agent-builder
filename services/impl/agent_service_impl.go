@@ -101,6 +101,14 @@ func (s *agentServiceImpl) CreateAgent(ctx context.Context, req models.CreateAge
 		agent.Tags = tagsJSON
 	}
 
+	if len(req.Skills) > 0 {
+		skillsJSON, err := models.ConvertToJSON(req.Skills)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert skills: %w", err)
+		}
+		agent.Skills = skillsJSON
+	}
+
 	if err := s.db.WithContext(ctx).Create(agent).Error; err != nil {
 		return nil, fmt.Errorf("failed to create agent: %w", err)
 	}
@@ -204,6 +212,14 @@ func (s *agentServiceImpl) UpdateAgent(ctx context.Context, id uuid.UUID, req mo
 			return nil, fmt.Errorf("failed to convert tags: %w", err)
 		}
 		updates["tags"] = tagsJSON
+	}
+
+	if req.Skills != nil {
+		skillsJSON, err := models.ConvertToJSON(req.Skills)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert skills: %w", err)
+		}
+		updates["skills"] = skillsJSON
 	}
 
 	updates["updated_at"] = time.Now()

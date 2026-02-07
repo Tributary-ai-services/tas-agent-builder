@@ -56,14 +56,43 @@ type StatsService interface {
 
 type RouterService interface {
 	SendRequest(ctx context.Context, agentConfig models.AgentLLMConfig, messages []Message, userID uuid.UUID) (*RouterResponse, error)
+	SendRequestWithTools(ctx context.Context, agentConfig models.AgentLLMConfig, messages []Message, tools []ToolDefinition, toolChoice string, userID uuid.UUID) (*RouterResponse, error)
 	ValidateConfig(ctx context.Context, config models.AgentLLMConfig) error
 	GetAvailableProviders(ctx context.Context) ([]Provider, error)
 	GetProviderModels(ctx context.Context, provider string) ([]Model, error)
 }
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+}
+
+// ToolCall represents a tool call requested by the LLM
+type ToolCall struct {
+	ID       string       `json:"id"`
+	Type     string       `json:"type"`
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction contains the function name and arguments for a tool call
+type ToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON string
+}
+
+// ToolDefinition defines a tool available for LLM function calling
+type ToolDefinition struct {
+	Type     string          `json:"type"` // "function"
+	Function ToolFunctionDef `json:"function"`
+}
+
+// ToolFunctionDef defines a function that can be called by the LLM
+type ToolFunctionDef struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	Parameters  interface{} `json:"parameters"` // JSON Schema
 }
 
 type RouterResponse struct {
@@ -75,6 +104,8 @@ type RouterResponse struct {
 	CostUSD         float64                `json:"cost_usd"`
 	ResponseTimeMs  int                    `json:"response_time_ms"`
 	Metadata        map[string]interface{} `json:"metadata"`
+	ToolCalls       []ToolCall             `json:"tool_calls,omitempty"`
+	FinishReason    string                 `json:"finish_reason,omitempty"`
 }
 
 type Provider struct {
@@ -277,6 +308,9 @@ type MCPContextService interface {
 
 	// ListAvailableTools lists all available MCP tools for document retrieval
 	ListAvailableTools(ctx context.Context) ([]models.MCPToolDefinition, error)
+
+	// ListToolsForLLM returns tools in OpenAI function-calling format for LLM requests
+	ListToolsForLLM(ctx context.Context) ([]ToolDefinition, error)
 
 	// SearchDocuments searches documents using MCP search tool
 	SearchDocuments(ctx context.Context, req models.MCPSearchRequest) (*models.DocumentContextResult, error)

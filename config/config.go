@@ -17,6 +17,15 @@ type Config struct {
 	AudiModal AudiModalConfig `json:"audimodal"`
 	Aether    AetherConfig    `json:"aether"`
 	Redis     RedisConfig     `json:"redis"`
+	MCP       MCPConfig       `json:"mcp"`
+}
+
+// MCPConfig holds configuration for MCP tool integration
+type MCPConfig struct {
+	ServerURL         string `json:"server_url"`
+	Timeout           int    `json:"timeout"`
+	MaxToolIterations int    `json:"max_tool_iterations"`
+	Enabled           bool   `json:"enabled"`
 }
 
 type ServerConfig struct {
@@ -159,6 +168,12 @@ func LoadConfig() (*Config, error) {
 			DB:                 getEnvAsInt("REDIS_DB", 0),
 			ContextCacheTTL:    getEnvAsInt("REDIS_CONTEXT_CACHE_TTL", 1800), // 30 minutes default
 			EnableContextCache: getEnvAsBool("REDIS_ENABLE_CONTEXT_CACHE", true),
+		},
+		MCP: MCPConfig{
+			ServerURL:         getEnv("MCP_SERVER_URL", "http://napkin-mcp.tas-mcp-servers.svc.cluster.local:8087"),
+			Timeout:           getEnvAsInt("MCP_TIMEOUT", 120),
+			MaxToolIterations: getEnvAsInt("MCP_MAX_TOOL_ITERATIONS", 10),
+			Enabled:           getEnvAsBool("MCP_ENABLED", true),
 		},
 	}
 

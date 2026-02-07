@@ -355,15 +355,17 @@ type MCPConfig struct {
 // DefaultMCPConfig returns sensible defaults for MCP context
 func DefaultMCPConfig() *MCPConfig {
 	return &MCPConfig{
-		ServerURL:            "http://tas-mcp:8082",
-		TimeoutMs:            30000,
-		MaxAutonomousSteps:   5,
+		ServerURL:            "http://napkin-mcp.tas-mcp-servers.svc.cluster.local:8087",
+		TimeoutMs:            120000,
+		MaxAutonomousSteps:   10,
 		AllowQueryRefinement: true,
 		EnabledTools: []string{
-			"search_documents",
-			"get_document_content",
-			"get_document_summary",
-			"list_notebook_documents",
+			"generate_visual",
+			"list_styles",
+			"get_visual_status",
+			"download_visual",
+			"list_visuals",
+			"delete_visual",
 		},
 	}
 }

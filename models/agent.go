@@ -248,7 +248,8 @@ type Agent struct {
 	EnableMemory        bool                   `json:"enable_memory" gorm:"default:true"`
 	DocumentContext     *DocumentContextConfig `json:"document_context,omitempty" gorm:"type:jsonb"`
 
-	Tags datatypes.JSON `json:"tags" gorm:"type:jsonb;default:'[]'"`
+	Tags   datatypes.JSON `json:"tags" gorm:"type:jsonb;default:'[]'"`
+	Skills datatypes.JSON `json:"skills" gorm:"type:jsonb;default:'[]'"` // Skill name strings
 
 	TotalExecutions     int     `json:"total_executions" gorm:"default:0"`
 	TotalCostUSD        float64 `json:"total_cost_usd" gorm:"type:decimal(10,6);default:0"`
@@ -277,6 +278,7 @@ type CreateAgentRequest struct {
 	IsInternal   bool           `json:"is_internal"` // System agents - only settable by system
 	NotebookIDs  []uuid.UUID    `json:"notebook_ids"`
 	Tags         []string       `json:"tags"`
+	Skills       []string       `json:"skills"`
 
 	// Document Context Configuration
 	EnableKnowledge bool                   `json:"enable_knowledge"`
@@ -296,6 +298,7 @@ type UpdateAgentRequest struct {
 	IsInternal   *bool           `json:"is_internal,omitempty"` // System agents - only settable by system
 	NotebookIDs  []uuid.UUID     `json:"notebook_ids,omitempty"`
 	Tags         []string        `json:"tags,omitempty"`
+	Skills       []string        `json:"skills,omitempty"`
 
 	// Document Context Configuration
 	EnableKnowledge *bool                  `json:"enable_knowledge,omitempty"`
