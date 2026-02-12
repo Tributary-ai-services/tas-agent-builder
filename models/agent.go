@@ -41,6 +41,7 @@ type AgentLLMConfig struct {
 	MaxCost          *float64          `json:"max_cost,omitempty"`          // Maximum cost threshold
 	RetryConfig      *RetryConfig      `json:"retry_config,omitempty"`      // Retry configuration
 	FallbackConfig   *FallbackConfig   `json:"fallback_config,omitempty"`   // Fallback configuration
+	Streaming        *bool             `json:"streaming,omitempty"`          // Enable SSE streaming (default true)
 }
 
 // RetryConfig defines retry behavior for failed requests

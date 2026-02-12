@@ -1,6 +1,7 @@
 package impl
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -20,6 +21,7 @@ import (
 type routerServiceImpl struct {
 	config           *config.RouterConfig
 	httpClient       *http.Client
+	streamClient     *http.Client // No total timeout, for SSE streaming
 	modelLimitsCache map[string]int // Cache for model max_output_tokens
 }
 
@@ -29,6 +31,11 @@ func NewRouterService(cfg *config.RouterConfig) services.RouterService {
 		httpClient: &http.Client{
 			Timeout: time.Duration(cfg.Timeout) * time.Second,
 		},
+		streamClient: &http.Client{
+			// No Timeout — streaming responses flow incrementally, so a total
+			// timeout would kill long-running generations. Connection-level
+			// timeouts are handled by the default transport.
+		},
 		modelLimitsCache: make(map[string]int),
 	}
 }
@@ -37,7 +44,7 @@ func (s *routerServiceImpl) SendRequest(ctx context.Context, agentConfig models.
 	// Cap max_tokens to model-specific limits from router to prevent API errors
 	maxTokens := s.capMaxTokensForModel(ctx, agentConfig.MaxTokens, agentConfig.Model)
 
-	// Build router request
+	// Build router request with streaming enabled
 	request := RouterRequest{
 		Model:            agentConfig.Model,
 		Messages:         make([]RouterMessage, len(messages)),
@@ -45,12 +52,15 @@ func (s *routerServiceImpl) SendRequest(ctx context.Context, agentConfig models.
 		MaxTokens:        maxTokens,
 		TopP:             agentConfig.TopP,
 		Stop:             agentConfig.Stop,
+		Stream:           getStreaming(agentConfig),
 		OptimizeFor:      "cost", // Default optimization
 		RequiredFeatures: agentConfig.RequiredFeatures,
 		MaxCost:          agentConfig.MaxCost,
 		RetryConfig:      buildRetryConfig(agentConfig.RetryConfig),
 		FallbackConfig:   buildFallbackConfig(agentConfig.FallbackConfig),
 	}
+
+	streaming := request.Stream
 
 	// Convert messages
 	for i, msg := range messages {
@@ -87,6 +97,9 @@ func (s *routerServiceImpl) SendRequest(ctx context.Context, agentConfig models.
 
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
+	if streaming {
+		req.Header.Set("Accept", "text/event-stream")
+	}
 	if s.config.APIKey != "" {
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.config.APIKey))
 	}
@@ -94,48 +107,54 @@ func (s *routerServiceImpl) SendRequest(ctx context.Context, agentConfig models.
 	// Add user context headers
 	req.Header.Set("X-User-ID", userID.String())
 
-	// Send request with retries
+	// Send request with retries — use streamClient for streaming (no total timeout)
 	var resp *http.Response
 	var lastErr error
-	
+	client := s.httpClient
+	if streaming {
+		client = s.streamClient
+	}
+
 	for attempt := 0; attempt <= s.config.MaxRetries; attempt++ {
 		startTime := time.Now()
-		resp, err = s.httpClient.Do(req)
-		responseTime := time.Since(startTime)
-
+		resp, err = client.Do(req)
 		if err != nil {
 			lastErr = err
 			if attempt < s.config.MaxRetries {
-				time.Sleep(time.Duration(attempt+1) * time.Second) // Exponential backoff
+				time.Sleep(time.Duration(attempt+1) * time.Second)
+				// Rebuild request body for retry
+				req.Body = io.NopCloser(bytes.NewBuffer(jsonData))
 				continue
 			}
 			break
 		}
 
-		defer resp.Body.Close()
-
-		// Read response body
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read response body: %w", err)
-		}
-
-		// Handle non-200 status codes
+		// Handle non-200 status codes (read error body synchronously)
 		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
 			if attempt < s.config.MaxRetries && (resp.StatusCode == 429 || resp.StatusCode >= 500) {
 				time.Sleep(time.Duration(attempt+1) * time.Second)
+				req.Body = io.NopCloser(bytes.NewBuffer(jsonData))
 				continue
 			}
 			return nil, fmt.Errorf("router returned status %d: %s", resp.StatusCode, string(body))
 		}
 
-		// Parse response
-		var routerResp RouterAPIResponse
-		if err := json.Unmarshal(body, &routerResp); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal router response: %w", err)
+		// Read response — streaming or synchronous
+		var routerResp *RouterAPIResponse
+		if streaming {
+			routerResp, err = readStreamResponse(resp.Body)
+		} else {
+			routerResp, err = readSyncResponse(resp.Body)
+		}
+		resp.Body.Close()
+		responseTime := time.Since(startTime)
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
 		}
 
-		// Convert to service response
 		if len(routerResp.Choices) == 0 {
 			return nil, fmt.Errorf("no choices in router response")
 		}
@@ -176,6 +195,10 @@ func (s *routerServiceImpl) SendRequest(ctx context.Context, agentConfig models.
 			},
 		}
 
+		log.Printf("[%s] Completed response: model=%s, content_len=%d, tokens=%d, time=%dms",
+			map[bool]string{true: "STREAM", false: "SYNC"}[streaming],
+			routerResp.Model, len(response.Content), routerResp.Usage.TotalTokens, int(responseTime.Milliseconds()))
+
 		return response, nil
 	}
 
@@ -190,7 +213,7 @@ func (s *routerServiceImpl) SendRequestWithTools(ctx context.Context, agentConfi
 	// Cap max_tokens to model-specific limits
 	maxTokens := s.capMaxTokensForModel(ctx, agentConfig.MaxTokens, agentConfig.Model)
 
-	// Build router request with tools
+	// Build router request with tools — streaming enabled
 	request := RouterRequest{
 		Model:            agentConfig.Model,
 		Messages:         make([]RouterMessage, len(messages)),
@@ -198,6 +221,7 @@ func (s *routerServiceImpl) SendRequestWithTools(ctx context.Context, agentConfi
 		MaxTokens:        maxTokens,
 		TopP:             agentConfig.TopP,
 		Stop:             agentConfig.Stop,
+		Stream:           getStreaming(agentConfig),
 		OptimizeFor:      "cost",
 		RequiredFeatures: agentConfig.RequiredFeatures,
 		MaxCost:          agentConfig.MaxCost,
@@ -265,10 +289,12 @@ func (s *routerServiceImpl) SendRequestWithTools(ctx context.Context, agentConfi
 		return nil, fmt.Errorf("failed to marshal router request: %w", err)
 	}
 
+	streaming := request.Stream
+
 	// Debug: log the request tools and tool_choice being sent
 	if len(request.Tools) > 0 {
-		log.Printf("[MCP-TOOLS-DEBUG] Sending to router: model=%s, tool_choice=%s, tools=%d, messages=%d",
-			request.Model, request.ToolChoice, len(request.Tools), len(request.Messages))
+		log.Printf("[MCP-TOOLS-DEBUG] Sending to router (streaming=%v): model=%s, tool_choice=%s, tools=%d, messages=%d",
+			streaming, request.Model, request.ToolChoice, len(request.Tools), len(request.Messages))
 		for i, t := range request.Tools {
 			log.Printf("[MCP-TOOLS-DEBUG]   tool[%d]: type=%s name=%s", i, t.Type, t.Function.Name)
 		}
@@ -282,69 +308,59 @@ func (s *routerServiceImpl) SendRequestWithTools(ctx context.Context, agentConfi
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	if streaming {
+		req.Header.Set("Accept", "text/event-stream")
+	}
 	if s.config.APIKey != "" {
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.config.APIKey))
 	}
 	req.Header.Set("X-User-ID", userID.String())
 
-	// Send request with retries
+	// Send request with retries — use streamClient for streaming (no total timeout)
 	var resp *http.Response
 	var lastErr error
+	client := s.httpClient
+	if streaming {
+		client = s.streamClient
+	}
 
 	for attempt := 0; attempt <= s.config.MaxRetries; attempt++ {
 		startTime := time.Now()
-		resp, err = s.httpClient.Do(req)
-		responseTime := time.Since(startTime)
-
+		resp, err = client.Do(req)
 		if err != nil {
 			lastErr = err
 			if attempt < s.config.MaxRetries {
 				time.Sleep(time.Duration(attempt+1) * time.Second)
+				req.Body = io.NopCloser(bytes.NewBuffer(jsonData))
 				continue
 			}
 			break
 		}
 
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read response body: %w", err)
-		}
-
+		// Handle non-200 status codes (read error body synchronously)
 		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
 			if attempt < s.config.MaxRetries && (resp.StatusCode == 429 || resp.StatusCode >= 500) {
 				time.Sleep(time.Duration(attempt+1) * time.Second)
+				req.Body = io.NopCloser(bytes.NewBuffer(jsonData))
 				continue
 			}
 			return nil, fmt.Errorf("router returned status %d: %s", resp.StatusCode, string(body))
 		}
 
-		// Parse response
-		var routerResp RouterAPIResponse
-		if err := json.Unmarshal(body, &routerResp); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal router response: %w", err)
+		// Read response — streaming or synchronous
+		var routerResp *RouterAPIResponse
+		if streaming {
+			routerResp, err = readStreamResponse(resp.Body)
+		} else {
+			routerResp, err = readSyncResponse(resp.Body)
 		}
+		resp.Body.Close()
+		responseTime := time.Since(startTime)
 
-		// Debug: log raw response details for tool-call debugging
-		if len(request.Tools) > 0 {
-			log.Printf("[MCP-TOOLS-DEBUG] Router response model=%s, choices=%d", routerResp.Model, len(routerResp.Choices))
-			if len(routerResp.Choices) > 0 {
-				c0 := routerResp.Choices[0]
-				log.Printf("[MCP-TOOLS-DEBUG] Choice[0] finish_reason=%s, tool_calls=%d, content_len=%d",
-					c0.FinishReason, len(c0.Message.ToolCalls), len(c0.Message.Content))
-				if len(c0.Message.ToolCalls) > 0 {
-					for i, tc := range c0.Message.ToolCalls {
-						log.Printf("[MCP-TOOLS-DEBUG]   tool_call[%d]: id=%s name=%s", i, tc.ID, tc.Function.Name)
-					}
-				}
-			}
-			// Log raw body snippet for troubleshooting
-			bodyStr := string(body)
-			if len(bodyStr) > 1000 {
-				bodyStr = bodyStr[:1000] + "..."
-			}
-			log.Printf("[MCP-TOOLS-DEBUG] Raw response body: %s", bodyStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read response: %w", err)
 		}
 
 		if len(routerResp.Choices) == 0 {
@@ -352,6 +368,16 @@ func (s *routerServiceImpl) SendRequestWithTools(ctx context.Context, agentConfi
 		}
 
 		choice := routerResp.Choices[0]
+
+		// Debug: log response details for tool-call debugging
+		if len(request.Tools) > 0 {
+			log.Printf("[MCP-TOOLS-DEBUG] Router streaming response model=%s, tool_calls=%d, content_len=%d, finish_reason=%s",
+				routerResp.Model, len(choice.Message.ToolCalls), len(choice.Message.Content), choice.FinishReason)
+			for i, tc := range choice.Message.ToolCalls {
+				log.Printf("[MCP-TOOLS-DEBUG]   tool_call[%d]: id=%s name=%s args_len=%d",
+					i, tc.ID, tc.Function.Name, len(tc.Function.Arguments))
+			}
+		}
 
 		// Extract provider
 		provider := extractProvider(routerResp.Model)
@@ -379,7 +405,7 @@ func (s *routerServiceImpl) SendRequestWithTools(ctx context.Context, agentConfi
 			},
 		}
 
-		// Extract tool calls from response
+		// Extract tool calls from accumulated stream
 		if len(choice.Message.ToolCalls) > 0 {
 			response.ToolCalls = make([]services.ToolCall, len(choice.Message.ToolCalls))
 			for i, tc := range choice.Message.ToolCalls {
@@ -393,6 +419,10 @@ func (s *routerServiceImpl) SendRequestWithTools(ctx context.Context, agentConfi
 				}
 			}
 		}
+
+		log.Printf("[%s] Completed response with tools: model=%s, content_len=%d, tool_calls=%d, time=%dms",
+			map[bool]string{true: "STREAM", false: "SYNC"}[streaming],
+			routerResp.Model, len(response.Content), len(response.ToolCalls), int(responseTime.Milliseconds()))
 
 		return response, nil
 	}
@@ -524,6 +554,24 @@ func (s *routerServiceImpl) GetProviderModels(ctx context.Context, provider stri
 	return models, nil
 }
 
+// getStreaming returns the streaming setting from the agent config.
+// Defaults to true if not explicitly set.
+func getStreaming(cfg models.AgentLLMConfig) bool {
+	if cfg.Streaming == nil {
+		return true
+	}
+	return *cfg.Streaming
+}
+
+// readSyncResponse reads a standard JSON response (non-streaming) from the LLM router.
+func readSyncResponse(body io.Reader) (*RouterAPIResponse, error) {
+	var resp RouterAPIResponse
+	if err := json.NewDecoder(body).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	return &resp, nil
+}
+
 // Helper types for router API
 type RouterRequest struct {
 	Model            string          `json:"model"`
@@ -533,6 +581,7 @@ type RouterRequest struct {
 	TopP             *float64        `json:"top_p,omitempty"`
 	TopK             *int            `json:"top_k,omitempty"`
 	Stop             []string        `json:"stop,omitempty"`
+	Stream           bool            `json:"stream,omitempty"`
 	OptimizeFor      string          `json:"optimize_for,omitempty"`
 	RequiredFeatures []string        `json:"required_features,omitempty"`
 	MaxCost          *float64        `json:"max_cost,omitempty"`
@@ -793,6 +842,213 @@ func extractReliabilityMetadata(routerMeta map[string]interface{}) ReliabilityMe
 	}
 
 	return metadata
+}
+
+// --- SSE Streaming types and reader ---
+
+// StreamChunk represents a single SSE chunk from the LLM router
+type StreamChunk struct {
+	ID             string                 `json:"id"`
+	Object         string                 `json:"object"`
+	Created        int64                  `json:"created"`
+	Model          string                 `json:"model"`
+	Choices        []StreamChoice         `json:"choices"`
+	Usage          *RouterUsage           `json:"usage,omitempty"`
+	RouterMetadata map[string]interface{} `json:"router_metadata,omitempty"`
+}
+
+type StreamChoice struct {
+	Index        int          `json:"index"`
+	Delta        *StreamDelta `json:"delta,omitempty"`
+	FinishReason string       `json:"finish_reason,omitempty"`
+}
+
+type StreamDelta struct {
+	Role      string                `json:"role,omitempty"`
+	Content   string                `json:"content,omitempty"`
+	ToolCalls []StreamToolCallDelta `json:"tool_calls,omitempty"`
+}
+
+// StreamToolCallDelta represents an incremental tool call fragment in SSE
+type StreamToolCallDelta struct {
+	Index    int                   `json:"index"`
+	ID       string                `json:"id,omitempty"`
+	Type     string                `json:"type,omitempty"`
+	Function *StreamFunctionDelta  `json:"function,omitempty"`
+}
+
+// StreamFunctionDelta represents incremental function call data
+type StreamFunctionDelta struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
+// toolCallAccumulator collects incremental tool call deltas by index
+type toolCallAccumulator struct {
+	ID        string
+	Type      string
+	Name      string
+	Arguments strings.Builder
+}
+
+// readStreamResponse reads an SSE stream from the LLM router and accumulates
+// it into a single RouterAPIResponse, as if it were a non-streaming response.
+// Handles both content deltas and tool call deltas.
+func readStreamResponse(body io.Reader) (*RouterAPIResponse, error) {
+	scanner := bufio.NewScanner(body)
+	// SSE lines can be large (e.g. metadata chunk with routing info)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var (
+		contentBuilder strings.Builder
+		model          string
+		id             string
+		created        int64
+		finishReason   string
+		usage          RouterUsage
+		routerMetadata map[string]interface{}
+		gotContent     bool
+		gotToolCalls   bool
+		toolCalls      = make(map[int]*toolCallAccumulator) // keyed by tool call index
+	)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Skip empty lines (SSE event separator)
+		if line == "" {
+			continue
+		}
+
+		// Only process data lines
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		data := strings.TrimPrefix(line, "data: ")
+
+		// End of stream
+		if data == "[DONE]" {
+			break
+		}
+
+		// Parse chunk
+		var chunk StreamChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			log.Printf("[STREAM] Failed to parse SSE chunk: %v (data: %.100s)", err, data)
+			continue
+		}
+
+		// Capture router metadata (typically in the first chunk)
+		if chunk.RouterMetadata != nil {
+			routerMetadata = chunk.RouterMetadata
+		}
+
+		// Capture response identity
+		if chunk.ID != "" {
+			id = chunk.ID
+		}
+		if chunk.Model != "" {
+			model = chunk.Model
+		}
+		if chunk.Created != 0 {
+			created = chunk.Created
+		}
+
+		// Capture usage (typically in the last chunk)
+		if chunk.Usage != nil {
+			usage = *chunk.Usage
+		}
+
+		// Accumulate content and tool calls from deltas
+		for _, choice := range chunk.Choices {
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
+			if choice.Delta == nil {
+				continue
+			}
+
+			// Accumulate content
+			if choice.Delta.Content != "" {
+				contentBuilder.WriteString(choice.Delta.Content)
+				gotContent = true
+			}
+
+			// Accumulate tool call deltas by index
+			for _, tcDelta := range choice.Delta.ToolCalls {
+				acc, exists := toolCalls[tcDelta.Index]
+				if !exists {
+					acc = &toolCallAccumulator{}
+					toolCalls[tcDelta.Index] = acc
+					gotToolCalls = true
+				}
+				// Capture ID and Type from the first delta for this index
+				if tcDelta.ID != "" {
+					acc.ID = tcDelta.ID
+				}
+				if tcDelta.Type != "" {
+					acc.Type = tcDelta.Type
+				}
+				// Accumulate function name and arguments
+				if tcDelta.Function != nil {
+					if tcDelta.Function.Name != "" {
+						acc.Name = tcDelta.Function.Name
+					}
+					if tcDelta.Function.Arguments != "" {
+						acc.Arguments.WriteString(tcDelta.Function.Arguments)
+					}
+				}
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading SSE stream: %w", err)
+	}
+
+	if !gotContent && !gotToolCalls && finishReason == "" {
+		return nil, fmt.Errorf("empty streaming response: no content or tool calls received")
+	}
+
+	// Build the accumulated tool calls in index order
+	var resultToolCalls []RouterToolCall
+	if gotToolCalls {
+		for i := 0; i < len(toolCalls); i++ {
+			acc, ok := toolCalls[i]
+			if !ok {
+				continue
+			}
+			resultToolCalls = append(resultToolCalls, RouterToolCall{
+				ID:   acc.ID,
+				Type: acc.Type,
+				Function: RouterToolCallFunction{
+					Name:      acc.Name,
+					Arguments: acc.Arguments.String(),
+				},
+			})
+		}
+	}
+
+	return &RouterAPIResponse{
+		ID:      id,
+		Object:  "chat.completion",
+		Created: created,
+		Model:   model,
+		Choices: []RouterChoice{
+			{
+				Index: 0,
+				Message: RouterMessage{
+					Role:      "assistant",
+					Content:   contentBuilder.String(),
+					ToolCalls: resultToolCalls,
+				},
+				FinishReason: finishReason,
+			},
+		},
+		Usage:          usage,
+		RouterMetadata: routerMetadata,
+	}, nil
 }
 
 func calculateCostUSD(usage RouterUsage, model string) float64 {
