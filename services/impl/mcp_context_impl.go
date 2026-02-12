@@ -40,18 +40,14 @@ func NewMCPContextService(mcpServerURL string, config *models.MCPConfig) service
 }
 
 // InvokeTool invokes an MCP tool and returns the result
+// Uses plain JSON POST to napkin-mcp's /mcp/tools/call endpoint
 func (s *mcpContextServiceImpl) InvokeTool(ctx context.Context, req models.MCPToolRequest) (*models.MCPToolResponse, error) {
 	startTime := time.Now()
 
-	// Build the MCP tool call request
+	// Build plain JSON request (not JSON-RPC)
 	mcpRequest := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      uuid.New().String(),
-		"method":  "tools/call",
-		"params": map[string]any{
-			"name":      req.ToolName,
-			"arguments": req.Parameters,
-		},
+		"name":      req.ToolName,
+		"arguments": req.Parameters,
 	}
 
 	reqBody, err := json.Marshal(mcpRequest)
@@ -92,61 +88,65 @@ func (s *mcpContextServiceImpl) InvokeTool(ctx context.Context, req models.MCPTo
 		}, nil
 	}
 
-	// Parse MCP response
+	// Parse napkin-mcp response: {"content":[{"type":"text","text":"..."}], "isError":bool}
 	var mcpResp struct {
-		Result any    `json:"result"`
-		Error  *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
 	}
 
 	if err := json.Unmarshal(body, &mcpResp); err != nil {
 		return &models.MCPToolResponse{
 			ToolName:    req.ToolName,
 			Success:     false,
-			Error:       fmt.Sprintf("failed to parse MCP response: %v", err),
+			Error:       fmt.Sprintf("failed to parse MCP response: %v (body: %s)", err, string(body)),
 			ExecutionMs: int(time.Since(startTime).Milliseconds()),
 		}, nil
 	}
 
-	if mcpResp.Error != nil {
+	// Extract text content from response
+	var resultText string
+	for _, c := range mcpResp.Content {
+		if c.Type == "text" {
+			resultText = c.Text
+			break
+		}
+	}
+
+	if mcpResp.IsError {
 		return &models.MCPToolResponse{
 			ToolName:    req.ToolName,
 			Success:     false,
-			Error:       mcpResp.Error.Message,
+			Error:       resultText,
 			ExecutionMs: int(time.Since(startTime).Milliseconds()),
 		}, nil
+	}
+
+	// Try to parse the text as JSON for structured results
+	var resultObj interface{}
+	if err := json.Unmarshal([]byte(resultText), &resultObj); err != nil {
+		// Not JSON, use the raw text
+		resultObj = resultText
 	}
 
 	return &models.MCPToolResponse{
 		ToolName:    req.ToolName,
 		Success:     true,
-		Result:      mcpResp.Result,
+		Result:      resultObj,
 		ExecutionMs: int(time.Since(startTime).Milliseconds()),
 	}, nil
 }
 
-// ListAvailableTools lists all available MCP tools for document retrieval
+// ListAvailableTools lists all available MCP tools
+// Uses GET /mcp/tools/list on napkin-mcp's HTTP endpoint
 func (s *mcpContextServiceImpl) ListAvailableTools(ctx context.Context) ([]models.MCPToolDefinition, error) {
-	// Build the MCP tools/list request
-	mcpRequest := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      uuid.New().String(),
-		"method":  "tools/list",
-	}
-
-	reqBody, err := json.Marshal(mcpRequest)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal MCP request: %w", err)
-	}
-
-	// Create HTTP request
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", s.mcpServerURL+"/mcp/tools/list", bytes.NewReader(reqBody))
+	// Create GET request (napkin-mcp uses plain HTTP, not JSON-RPC)
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", s.mcpServerURL+"/mcp/tools/list", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
 
 	// Execute request
 	resp, err := s.httpClient.Do(httpReq)
@@ -161,31 +161,28 @@ func (s *mcpContextServiceImpl) ListAvailableTools(ctx context.Context) ([]model
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Parse MCP response
+	// Parse response: {"tools": [{name, description, inputSchema}, ...]}
 	var mcpResp struct {
-		Result struct {
-			Tools []struct {
-				Name        string                 `json:"name"`
-				Description string                 `json:"description"`
-				InputSchema map[string]interface{} `json:"inputSchema"`
-			} `json:"tools"`
-		} `json:"result"`
+		Tools []struct {
+			Name        string                 `json:"name"`
+			Description string                 `json:"description"`
+			InputSchema map[string]interface{} `json:"inputSchema"`
+		} `json:"tools"`
 	}
 
 	if err := json.Unmarshal(body, &mcpResp); err != nil {
-		return nil, fmt.Errorf("failed to parse MCP response: %w", err)
+		return nil, fmt.Errorf("failed to parse MCP response: %w (body: %s)", err, string(body))
 	}
 
 	// Convert to our tool definition format
-	tools := make([]models.MCPToolDefinition, 0, len(mcpResp.Result.Tools))
-	for _, t := range mcpResp.Result.Tools {
-		// Only include document retrieval tools
+	tools := make([]models.MCPToolDefinition, 0, len(mcpResp.Tools))
+	for _, t := range mcpResp.Tools {
 		if s.isEnabledTool(t.Name) {
 			tools = append(tools, models.MCPToolDefinition{
 				Name:        t.Name,
 				Description: t.Description,
 				Parameters:  t.InputSchema,
-				Server:      "tas-mcp",
+				Server:      "napkin-mcp",
 			})
 		}
 	}
@@ -201,6 +198,180 @@ func (s *mcpContextServiceImpl) isEnabledTool(toolName string) bool {
 		}
 	}
 	return false
+}
+
+// ListToolsForLLM returns tools in OpenAI function-calling format for LLM requests
+func (s *mcpContextServiceImpl) ListToolsForLLM(ctx context.Context) ([]services.ToolDefinition, error) {
+	mcpTools, err := s.ListAvailableTools(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list MCP tools: %w", err)
+	}
+
+	tools := make([]services.ToolDefinition, len(mcpTools))
+	for i, t := range mcpTools {
+		// Use the inputSchema as parameters, or provide a permissive default
+		params := interface{}(t.Parameters)
+		if params == nil {
+			params = map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			}
+		}
+		tools[i] = services.ToolDefinition{
+			Type: "function",
+			Function: services.ToolFunctionDef{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  params,
+			},
+		}
+	}
+
+	return tools, nil
+}
+
+// ListToolsFromServer lists tools from an arbitrary MCP server URL
+// Unlike ListToolsForLLM which uses the configured server, this accepts any server URL
+func (s *mcpContextServiceImpl) ListToolsFromServer(ctx context.Context, serverURL string) ([]services.ToolDefinition, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, "GET", serverURL+"/mcp/tools/list", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP request for %s: %w", serverURL, err)
+	}
+
+	resp, err := s.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list tools from %s: %w", serverURL, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response from %s: %w", serverURL, err)
+	}
+
+	var mcpResp struct {
+		Tools []struct {
+			Name        string                 `json:"name"`
+			Description string                 `json:"description"`
+			InputSchema map[string]interface{} `json:"inputSchema"`
+		} `json:"tools"`
+	}
+
+	if err := json.Unmarshal(body, &mcpResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response from %s: %w (body: %s)", serverURL, err, string(body))
+	}
+
+	tools := make([]services.ToolDefinition, 0, len(mcpResp.Tools))
+	for _, t := range mcpResp.Tools {
+		params := interface{}(t.InputSchema)
+		if params == nil {
+			params = map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			}
+		}
+		tools = append(tools, services.ToolDefinition{
+			Type: "function",
+			Function: services.ToolFunctionDef{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  params,
+			},
+		})
+	}
+
+	return tools, nil
+}
+
+// InvokeToolOnServer invokes a tool on an arbitrary MCP server
+func (s *mcpContextServiceImpl) InvokeToolOnServer(ctx context.Context, serverURL string, req models.MCPToolRequest) (*models.MCPToolResponse, error) {
+	startTime := time.Now()
+
+	mcpRequest := map[string]any{
+		"name":      req.ToolName,
+		"arguments": req.Parameters,
+	}
+
+	reqBody, err := json.Marshal(mcpRequest)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal MCP request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", serverURL+"/mcp/tools/call", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if req.TenantID != "" {
+		httpReq.Header.Set("X-Tenant-ID", req.TenantID)
+	}
+
+	resp, err := s.httpClient.Do(httpReq)
+	if err != nil {
+		return &models.MCPToolResponse{
+			ToolName:    req.ToolName,
+			Success:     false,
+			Error:       fmt.Sprintf("HTTP request failed: %v", err),
+			ExecutionMs: int(time.Since(startTime).Milliseconds()),
+		}, nil
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return &models.MCPToolResponse{
+			ToolName:    req.ToolName,
+			Success:     false,
+			Error:       fmt.Sprintf("failed to read response: %v", err),
+			ExecutionMs: int(time.Since(startTime).Milliseconds()),
+		}, nil
+	}
+
+	var mcpResp struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+
+	if err := json.Unmarshal(body, &mcpResp); err != nil {
+		return &models.MCPToolResponse{
+			ToolName:    req.ToolName,
+			Success:     false,
+			Error:       fmt.Sprintf("failed to parse MCP response: %v (body: %s)", err, string(body)),
+			ExecutionMs: int(time.Since(startTime).Milliseconds()),
+		}, nil
+	}
+
+	var resultText string
+	for _, c := range mcpResp.Content {
+		if c.Type == "text" {
+			resultText = c.Text
+			break
+		}
+	}
+
+	if mcpResp.IsError {
+		return &models.MCPToolResponse{
+			ToolName:    req.ToolName,
+			Success:     false,
+			Error:       resultText,
+			ExecutionMs: int(time.Since(startTime).Milliseconds()),
+		}, nil
+	}
+
+	var resultObj interface{}
+	if err := json.Unmarshal([]byte(resultText), &resultObj); err != nil {
+		resultObj = resultText
+	}
+
+	return &models.MCPToolResponse{
+		ToolName:    req.ToolName,
+		Success:     true,
+		Result:      resultObj,
+		ExecutionMs: int(time.Since(startTime).Milliseconds()),
+	}, nil
 }
 
 // SearchDocuments searches documents using MCP search tool

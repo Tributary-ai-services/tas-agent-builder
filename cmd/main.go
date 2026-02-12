@@ -19,6 +19,7 @@ import (
 	"github.com/tas-agent-builder/config"
 	"github.com/tas-agent-builder/handlers"
 	"github.com/tas-agent-builder/models"
+	"github.com/tas-agent-builder/services"
 	"github.com/tas-agent-builder/services/impl"
 	"github.com/tas-agent-builder/services/memory"
 )
@@ -41,6 +42,7 @@ func main() {
 		&models.Agent{},
 		&models.AgentExecution{},
 		&models.AgentUsageStats{},
+		&models.Skill{},
 	); err != nil {
 		log.Fatal("Failed to migrate database:", err)
 	}
@@ -97,12 +99,34 @@ func main() {
 		log.Println("Memory service disabled (no Redis connection)")
 	}
 
+	// Initialize MCP context service if enabled
+	var mcpContextService services.MCPContextService
+	if cfg.MCP.Enabled {
+		mcpConfig := &models.MCPConfig{
+			ServerURL:          cfg.MCP.ServerURL,
+			TimeoutMs:          cfg.MCP.Timeout * 1000,
+			MaxAutonomousSteps: cfg.MCP.MaxToolIterations,
+		}
+		mcpContextService = impl.NewMCPContextService(cfg.MCP.ServerURL, mcpConfig)
+		log.Printf("MCP context service initialized: server=%s, timeout=%ds, max_iterations=%d",
+			cfg.MCP.ServerURL, cfg.MCP.Timeout, cfg.MCP.MaxToolIterations)
+	} else {
+		log.Println("MCP context service disabled")
+	}
+
+	// Initialize skill service and seed defaults
+	skillService := impl.NewSkillService(db)
+	if err := skillService.SeedDefaults(context.Background()); err != nil {
+		log.Printf("Warning: Failed to seed default skills: %v", err)
+	}
+
 	// Initialize handlers
-	agentHandlers := handlers.NewAgentHandlers(agentService, routerService, executionService, documentContextService, cacheService, memoryService)
+	agentHandlers := handlers.NewAgentHandlers(agentService, routerService, executionService, documentContextService, cacheService, memoryService, mcpContextService, skillService, cfg.MCP.Enabled, cfg.MCP.MaxToolIterations)
+	skillHandlers := handlers.NewSkillHandlers(skillService)
 	routerProxy := handlers.NewRouterProxyHandler(cfg.Router.BaseURL)
 	
 	// Setup router
-	router := setupRouter(agentHandlers, routerProxy, cfg)
+	router := setupRouter(agentHandlers, skillHandlers, routerProxy, cfg)
 	
 	// Start server
 	srv := &http.Server{
@@ -155,7 +179,7 @@ func initDB(databaseURL string) (*gorm.DB, error) {
 	return db, nil
 }
 
-func setupRouter(agentHandlers *handlers.AgentHandlers, routerProxy *handlers.RouterProxyHandler, cfg *config.Config) *gin.Engine {
+func setupRouter(agentHandlers *handlers.AgentHandlers, skillHandlers *handlers.SkillHandlers, routerProxy *handlers.RouterProxyHandler, cfg *config.Config) *gin.Engine {
 	// Set gin mode based on environment
 	if os.Getenv("ENVIRONMENT") == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -224,6 +248,16 @@ func setupRouter(agentHandlers *handlers.AgentHandlers, routerProxy *handlers.Ro
 		agents.POST("/:id/execute", agentHandlers.ExecuteAgent)
 	}
 	
+	// Skill routes
+	skills := v1.Group("/skills")
+	{
+		skills.POST("", skillHandlers.CreateSkill)
+		skills.GET("", skillHandlers.ListSkills)
+		skills.GET("/:id", skillHandlers.GetSkill)
+		skills.PUT("/:id", skillHandlers.UpdateSkill)
+		skills.DELETE("/:id", skillHandlers.DeleteSkill)
+	}
+
 	// Additional routes that exist in handlers
 	v1.GET("/agent-reliability-metrics", agentHandlers.GetAgentReliabilityMetrics)
 	v1.POST("/validate-agent-config", agentHandlers.ValidateAgentConfig)

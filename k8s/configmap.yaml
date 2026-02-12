@@ -39,3 +39,9 @@ data:
   LOG_MAX_BACKUPS: "3"
   LOG_MAX_AGE: "7"
   LOG_COMPRESS: "true"
+
+  # MCP Tool Integration Configuration
+  MCP_SERVER_URL: "http://napkin-mcp.tas-mcp-servers.svc.cluster.local:8087"
+  MCP_TIMEOUT: "120"
+  MCP_MAX_TOOL_ITERATIONS: "10"
+  MCP_ENABLED: "true"
