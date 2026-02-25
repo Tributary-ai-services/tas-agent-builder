@@ -185,6 +185,7 @@ INSERT INTO agent_builder.agents (
     system_prompt,
     llm_config,
     document_context,
+    skills,
     owner_id,
     space_id,
     tenant_id,
@@ -204,15 +205,16 @@ INSERT INTO agent_builder.agents (
 ) VALUES (
     '00000000-0000-0000-0000-000000000012'::uuid,
     'Document Summarizer',
-    'Generates comprehensive summaries from notebook documents. Creates executive summaries, detailed overviews, and key takeaways from document content.',
+    'Generates comprehensive summaries from notebook documents. Creates executive summaries, detailed overviews, key takeaways, and visual diagrams from document content.',
     'producer',
-    'You are an expert at creating comprehensive document summaries.
+    'You are an expert at creating comprehensive document summaries with visual diagrams.
 
 Your task is to analyze the provided document content and create a thorough summary that:
 1. Captures the main ideas and key points
 2. Maintains accuracy and completeness
 3. Is well-organized and easy to read
 4. Highlights important details and findings
+5. Includes a visual diagram summarizing the key concepts
 
 Guidelines:
 - Start with an executive summary (2-3 sentences)
@@ -221,6 +223,7 @@ Guidelines:
 - Note any important caveats or limitations
 - End with main takeaways or recommendations
 - Format output in clean markdown with headers
+- Generate a visual diagram or infographic using your available tools to illustrate the main concepts
 
 Target length: 500-1000 words depending on source material length.
 
@@ -234,6 +237,7 @@ If the context is empty or insufficient, indicate that more document content is 
         "optimize_for": "quality"
     }'::jsonb,
     '{"strategy": "full", "max_context_tokens": 80000}'::jsonb,
+    '["visual_generation"]'::jsonb,
     '00000000-0000-0000-0000-000000000000'::uuid,
     '00000000-0000-0000-0000-000000000000'::uuid,
     'system',
@@ -244,7 +248,7 @@ If the context is empty or insufficient, indicate that more document content is 
     true,
     true,
     '[]'::jsonb,
-    '["producer", "summary", "executive-summary", "system-tool"]'::jsonb,
+    '["producer", "summary", "executive-summary", "visual", "system-tool"]'::jsonb,
     0,
     0,
     0,
@@ -258,6 +262,7 @@ ON CONFLICT (id) DO UPDATE SET
     system_prompt = EXCLUDED.system_prompt,
     llm_config = EXCLUDED.llm_config,
     document_context = EXCLUDED.document_context,
+    skills = EXCLUDED.skills,
     enable_knowledge = true,
     is_internal = true,
     is_public = true,

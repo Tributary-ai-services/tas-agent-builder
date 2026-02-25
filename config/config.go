@@ -26,6 +26,7 @@ type MCPConfig struct {
 	Timeout           int    `json:"timeout"`
 	MaxToolIterations int    `json:"max_tool_iterations"`
 	Enabled           bool   `json:"enabled"`
+	AetherBeMCPURL    string `json:"aether_be_mcp_url"` // aether-be MCP proxy URL for connection-aware invocations
 }
 
 type ServerConfig struct {
@@ -174,6 +175,7 @@ func LoadConfig() (*Config, error) {
 			Timeout:           getEnvAsInt("MCP_TIMEOUT", 120),
 			MaxToolIterations: getEnvAsInt("MCP_MAX_TOOL_ITERATIONS", 10),
 			Enabled:           getEnvAsBool("MCP_ENABLED", true),
+			AetherBeMCPURL:    getEnv("AETHER_BE_MCP_URL", "http://aether-backend.aether-be.svc.cluster.local:8080/api/v1/mcp"),
 		},
 	}
 

@@ -28,6 +28,14 @@ type AgentHandlers struct {
 	skillService           services.SkillService
 	mcpEnabled             bool
 	mcpMaxToolIterations   int
+	aetherBeMCPURL         string
+}
+
+// toolRoutingInfo holds routing information for a tool invocation
+type toolRoutingInfo struct {
+	ServerURL    string // Direct MCP server URL
+	ServerID     string // Server ID for aether-be proxy (e.g. "mcp-neo4j")
+	ConnectionID string // Saved connection ID for multi-connection support
 }
 
 func NewAgentHandlers(
@@ -41,6 +49,7 @@ func NewAgentHandlers(
 	skillService services.SkillService,
 	mcpEnabled bool,
 	mcpMaxToolIterations int,
+	aetherBeMCPURL string,
 ) *AgentHandlers {
 	return &AgentHandlers{
 		agentService:           agentService,
@@ -53,6 +62,7 @@ func NewAgentHandlers(
 		skillService:           skillService,
 		mcpEnabled:             mcpEnabled,
 		mcpMaxToolIterations:   mcpMaxToolIterations,
+		aetherBeMCPURL:         aetherBeMCPURL,
 	}
 }
 
@@ -1516,8 +1526,8 @@ func (h *AgentHandlers) agentHasSkills(agent *models.Agent) bool {
 }
 
 // resolveToolsForAgent resolves tools from an agent's skills and returns tool definitions
-// along with a map of tool name → server URL for invocation routing
-func (h *AgentHandlers) resolveToolsForAgent(ctx context.Context, agent *models.Agent) ([]services.ToolDefinition, map[string]string, error) {
+// along with a map of tool name → routing info for invocation routing
+func (h *AgentHandlers) resolveToolsForAgent(ctx context.Context, agent *models.Agent) ([]services.ToolDefinition, map[string]toolRoutingInfo, error) {
 	if h.skillService == nil {
 		// No skill service — fall back to default MCP tools
 		tools, err := h.mcpContextService.ListToolsForLLM(ctx)
@@ -1542,7 +1552,7 @@ func (h *AgentHandlers) resolveToolsForAgent(ctx context.Context, agent *models.
 	}
 
 	var allTools []services.ToolDefinition
-	toolServerMap := make(map[string]string) // tool name → server URL
+	toolRouting := make(map[string]toolRoutingInfo) // tool name → routing info
 	seen := make(map[string]bool)
 
 	for _, skill := range skills {
@@ -1550,7 +1560,8 @@ func (h *AgentHandlers) resolveToolsForAgent(ctx context.Context, agent *models.
 			continue
 		}
 
-		log.Printf("[SKILLS] Discovering tools from skill %q (server: %s)", skill.Name, skill.MCPServerURL)
+		log.Printf("[SKILLS] Discovering tools from skill %q (server: %s, serverID: %s, connectionID: %s)",
+			skill.Name, skill.MCPServerURL, skill.MCPServerID, skill.MCPConnectionID)
 
 		// Get allowed tool names for this skill
 		var allowedTools []string
@@ -1577,13 +1588,17 @@ func (h *AgentHandlers) resolveToolsForAgent(ctx context.Context, agent *models.
 			if !seen[tool.Function.Name] {
 				seen[tool.Function.Name] = true
 				allTools = append(allTools, tool)
-				toolServerMap[tool.Function.Name] = skill.MCPServerURL
+				toolRouting[tool.Function.Name] = toolRoutingInfo{
+					ServerURL:    skill.MCPServerURL,
+					ServerID:     skill.MCPServerID,
+					ConnectionID: skill.MCPConnectionID,
+				}
 			}
 		}
 	}
 
 	log.Printf("[SKILLS] Resolved %d tools from %d skills", len(allTools), len(skills))
-	return allTools, toolServerMap, nil
+	return allTools, toolRouting, nil
 }
 
 // discoverToolsFromServer discovers tools from an MCP server URL
@@ -1686,11 +1701,69 @@ func (h *AgentHandlers) invokeToolOnServer(ctx context.Context, serverURL string
 	return resultText, nil
 }
 
+// invokeToolViaProxy invokes a tool through aether-be's MCP proxy, which handles
+// connection credential resolution for multi-connection support.
+func (h *AgentHandlers) invokeToolViaProxy(ctx context.Context, serverID string, toolName string, args map[string]interface{}, connectionID string) (string, error) {
+	proxyReq := map[string]interface{}{
+		"server_id": serverID,
+		"tool":      toolName,
+		"params":    args,
+	}
+	if connectionID != "" {
+		proxyReq["connection_id"] = connectionID
+	}
+
+	reqBody, err := json.Marshal(proxyReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal proxy request: %w", err)
+	}
+
+	url := h.aetherBeMCPURL + "/invoke"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(string(reqBody)))
+	if err != nil {
+		return "", fmt.Errorf("failed to create proxy request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("proxy request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var mcpResp struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&mcpResp); err != nil {
+		return "", fmt.Errorf("failed to parse proxy response: %w", err)
+	}
+
+	var resultText string
+	for _, c := range mcpResp.Content {
+		if c.Type == "text" {
+			resultText = c.Text
+			break
+		}
+	}
+
+	if mcpResp.IsError {
+		return "", fmt.Errorf("tool error: %s", resultText)
+	}
+
+	return resultText, nil
+}
+
 // executeWithToolLoop discovers MCP tools (via skills or default), sends them to the LLM,
 // and loops on tool_calls until the LLM returns a text response or max iterations are reached.
 func (h *AgentHandlers) executeWithToolLoop(ctx context.Context, agent *models.Agent, messages []services.Message, userID uuid.UUID) (*services.RouterResponse, error) {
 	// Resolve tools via skills system
-	tools, toolServerMap, err := h.resolveToolsForAgent(ctx, agent)
+	tools, toolRouting, err := h.resolveToolsForAgent(ctx, agent)
 	if err != nil {
 		log.Printf("[MCP-TOOLS] Failed to resolve tools, falling back to standard execution: %v", err)
 		return h.routerService.SendRequest(ctx, agent.LLMConfig, messages, userID)
@@ -1712,12 +1785,26 @@ func (h *AgentHandlers) executeWithToolLoop(ctx context.Context, agent *models.A
 	for i, t := range tools {
 		toolNames[i] = t.Function.Name
 	}
+	// Check if generate_visual tool is available
+	hasGenerateVisual := false
+	for _, name := range toolNames {
+		if name == "generate_visual" {
+			hasGenerateVisual = true
+			break
+		}
+	}
+
 	toolHint := fmt.Sprintf(
 		"\n\n--- AVAILABLE TOOLS ---\nYou have access to the following tools: %s. "+
-			"When your task involves generating visuals, diagrams, charts, or any action that matches a tool's capability, "+
-			"you MUST call the appropriate tool rather than describing what you would do. "+
+			"You MUST use the available tools as part of completing your task. "+
 			"After calling a tool, include the tool's result (such as download URLs or file paths) in your final response so the user can access it.",
 		strings.Join(toolNames, ", "))
+
+	if hasGenerateVisual {
+		toolHint += "\n\nIMPORTANT: You MUST call the 'generate_visual' tool to create a visual diagram or infographic " +
+			"that accompanies your text output. Pass a concise summary of the key points as the 'content' parameter. " +
+			"Include the resulting download URL in your final response as an image tag or link."
+	}
 
 	for i := range messages {
 		if messages[i].Role == "system" {
@@ -1781,12 +1868,23 @@ func (h *AgentHandlers) executeWithToolLoop(ctx context.Context, agent *models.A
 			var resultContent string
 
 			// Route tool invocation to the correct MCP server
-			if serverURL, ok := toolServerMap[tc.Function.Name]; ok && serverURL != "" {
-				// Invoke on the specific server for this skill's tool
-				result, err := h.invokeToolOnServer(ctx, serverURL, tc.Function.Name, args)
-				if err != nil {
-					resultContent = fmt.Sprintf("Error invoking tool: %v", err)
-					log.Printf("[MCP-TOOLS] Tool %s error: %v", tc.Function.Name, err)
+			if routing, ok := toolRouting[tc.Function.Name]; ok && routing.ServerURL != "" {
+				var result string
+				var invokeErr error
+
+				if routing.ConnectionID != "" && routing.ServerID != "" && h.aetherBeMCPURL != "" {
+					// Use aether-be proxy for connection-aware invocation
+					log.Printf("[MCP-TOOLS] Invoking %s via aether-be proxy (serverID=%s, connectionID=%s)",
+						tc.Function.Name, routing.ServerID, routing.ConnectionID)
+					result, invokeErr = h.invokeToolViaProxy(ctx, routing.ServerID, tc.Function.Name, args, routing.ConnectionID)
+				} else {
+					// Direct invocation on the MCP server
+					result, invokeErr = h.invokeToolOnServer(ctx, routing.ServerURL, tc.Function.Name, args)
+				}
+
+				if invokeErr != nil {
+					resultContent = fmt.Sprintf("Error invoking tool: %v", invokeErr)
+					log.Printf("[MCP-TOOLS] Tool %s error: %v", tc.Function.Name, invokeErr)
 				} else {
 					resultContent = result
 					log.Printf("[MCP-TOOLS] Tool %s succeeded, result length: %d", tc.Function.Name, len(resultContent))
