@@ -28,8 +28,10 @@ type Skill struct {
 	Keywords    datatypes.JSON `json:"keywords" gorm:"type:jsonb;default:'[]'"`
 
 	// MCP-specific fields
-	MCPServerURL string         `json:"mcp_server_url,omitempty"`
-	MCPToolNames datatypes.JSON `json:"mcp_tool_names" gorm:"type:jsonb;default:'[]'"`
+	MCPServerURL    string         `json:"mcp_server_url,omitempty"`
+	MCPServerID     string         `json:"mcp_server_id,omitempty"`     // Server ID for aether-be proxy (e.g. "mcp-neo4j")
+	MCPConnectionID string         `json:"mcp_connection_id,omitempty"` // Saved connection ID for multi-connection support
+	MCPToolNames    datatypes.JSON `json:"mcp_tool_names" gorm:"type:jsonb;default:'[]'"`
 
 	// Metadata
 	IsPublic  bool   `json:"is_public" gorm:"default:true"`
@@ -55,9 +57,11 @@ type CreateSkillRequest struct {
 	Icon         string    `json:"icon,omitempty"`
 	Tags         []string  `json:"tags"`
 	Keywords     []string  `json:"keywords"`
-	MCPServerURL string    `json:"mcp_server_url,omitempty"`
-	MCPToolNames []string  `json:"mcp_tool_names,omitempty"`
-	IsPublic     bool      `json:"is_public"`
+	MCPServerURL    string    `json:"mcp_server_url,omitempty"`
+	MCPServerID     string    `json:"mcp_server_id,omitempty"`
+	MCPConnectionID string    `json:"mcp_connection_id,omitempty"`
+	MCPToolNames    []string  `json:"mcp_tool_names,omitempty"`
+	IsPublic        bool      `json:"is_public"`
 	Author       string    `json:"author,omitempty"`
 	Version      string    `json:"version,omitempty"`
 }
@@ -69,9 +73,11 @@ type UpdateSkillRequest struct {
 	Icon         *string    `json:"icon,omitempty"`
 	Tags         []string   `json:"tags,omitempty"`
 	Keywords     []string   `json:"keywords,omitempty"`
-	MCPServerURL *string    `json:"mcp_server_url,omitempty"`
-	MCPToolNames []string   `json:"mcp_tool_names,omitempty"`
-	IsPublic     *bool      `json:"is_public,omitempty"`
+	MCPServerURL    *string    `json:"mcp_server_url,omitempty"`
+	MCPServerID     *string    `json:"mcp_server_id,omitempty"`
+	MCPConnectionID *string    `json:"mcp_connection_id,omitempty"`
+	MCPToolNames    []string   `json:"mcp_tool_names,omitempty"`
+	IsPublic        *bool      `json:"is_public,omitempty"`
 	Author       *string    `json:"author,omitempty"`
 	Version      *string    `json:"version,omitempty"`
 }

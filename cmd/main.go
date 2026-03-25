@@ -121,7 +121,7 @@ func main() {
 	}
 
 	// Initialize handlers
-	agentHandlers := handlers.NewAgentHandlers(agentService, routerService, executionService, documentContextService, cacheService, memoryService, mcpContextService, skillService, cfg.MCP.Enabled, cfg.MCP.MaxToolIterations)
+	agentHandlers := handlers.NewAgentHandlers(agentService, routerService, executionService, documentContextService, cacheService, memoryService, mcpContextService, skillService, cfg.MCP.Enabled, cfg.MCP.MaxToolIterations, cfg.MCP.AetherBeMCPURL)
 	skillHandlers := handlers.NewSkillHandlers(skillService)
 	routerProxy := handlers.NewRouterProxyHandler(cfg.Router.BaseURL)
 	

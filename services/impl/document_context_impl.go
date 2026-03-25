@@ -136,12 +136,12 @@ func (s *documentContextServiceImpl) RetrieveVectorContext(ctx context.Context, 
 
 	for _, result := range searchResp.Results {
 		chunk := models.RetrievedChunk{
-			ID:          result.Vector.ID,
-			DocumentID:  result.Vector.DocumentID,
-			Content:     result.Vector.Content,
-			Score:       result.Score,
-			Distance:    result.Distance,
-			Metadata:    result.Vector.Metadata,
+			ID:         result.Vector.ID,
+			DocumentID: result.Vector.DocumentID,
+			Content:    result.Vector.Content,
+			Score:      result.Score,
+			Distance:   result.Distance,
+			Metadata:   result.Vector.Metadata,
 		}
 
 		// Extract chunk metadata
@@ -737,7 +737,7 @@ func (s *documentContextServiceImpl) FormatContextForInjection(
 	}
 
 	var builder strings.Builder
-	builder.WriteString("\n--- RELEVANT CONTEXT ---\n\n")
+	builder.WriteString("\n=== RELEVANT CONTEXT ===\n\n")
 
 	currentTokens := s.EstimateTokenCount(builder.String())
 	truncated := false
@@ -763,7 +763,7 @@ func (s *documentContextServiceImpl) FormatContextForInjection(
 			if docName == "" {
 				docName = chunk.DocumentID
 			}
-			builder.WriteString(fmt.Sprintf("--- Document: %s ---\n", docName))
+			builder.WriteString(fmt.Sprintf("=== Document: %s ===\n", docName))
 			currentDocID = chunk.DocumentID
 			documentSet[chunk.DocumentID] = true
 		}
@@ -776,7 +776,7 @@ func (s *documentContextServiceImpl) FormatContextForInjection(
 		includedChunks++
 	}
 
-	builder.WriteString("\n--- END CONTEXT ---\n")
+	builder.WriteString("\n=== END CONTEXT ===\n")
 
 	formattedContext := builder.String()
 	totalTokens := s.EstimateTokenCount(formattedContext)
