@@ -14,12 +14,12 @@ type AgentService interface {
 	UpdateAgent(ctx context.Context, id uuid.UUID, req models.UpdateAgentRequest, ownerID string) (*models.Agent, error)
 	DeleteAgent(ctx context.Context, id uuid.UUID, ownerID string) error
 	ListAgents(ctx context.Context, filter models.AgentListFilter, userID string) (*models.AgentListResponse, error)
-	
+
 	PublishAgent(ctx context.Context, id uuid.UUID, ownerID string) error
 	UnpublishAgent(ctx context.Context, id uuid.UUID, ownerID string) error
-	
+
 	DuplicateAgent(ctx context.Context, sourceID uuid.UUID, newName string, userID string, tenantID string) (*models.Agent, error)
-	
+
 	GetAgentsBySpace(ctx context.Context, spaceID uuid.UUID, userID string) ([]models.Agent, error)
 	GetPublicAgents(ctx context.Context, filter models.AgentListFilter) (*models.AgentListResponse, error)
 	GetAgentTemplates(ctx context.Context, filter models.AgentListFilter) (*models.AgentListResponse, error)
@@ -44,10 +44,10 @@ type ExecutionService interface {
 type StatsService interface {
 	GetAgentStats(ctx context.Context, agentID uuid.UUID, userID uuid.UUID) (*models.StatsResponse, error)
 	UpdateAgentStats(ctx context.Context, agentID uuid.UUID) error
-	
+
 	GetUserAgentStats(ctx context.Context, userID uuid.UUID) ([]models.StatsResponse, error)
 	GetSpaceAgentStats(ctx context.Context, spaceID uuid.UUID, userID uuid.UUID) ([]models.StatsResponse, error)
-	
+
 	RefreshAllStats(ctx context.Context) error
 	ResetDailyStats(ctx context.Context) error
 	ResetWeeklyStats(ctx context.Context) error
@@ -63,10 +63,11 @@ type RouterService interface {
 }
 
 type Message struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	Role       string                 `json:"role"`
+	Content    string                 `json:"content"`
+	ToolCallID string                 `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall             `json:"tool_calls,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"` // Per-message metadata (e.g. trust: "pre_scanned")
 }
 
 // ToolCall represents a tool call requested by the LLM
@@ -116,12 +117,12 @@ type Provider struct {
 }
 
 type Model struct {
-	Name         string  `json:"name"`
-	DisplayName  string  `json:"display_name"`
-	Provider     string  `json:"provider"`
-	MaxTokens    int     `json:"max_tokens"`
-	CostPer1000  float64 `json:"cost_per_1000"`
-	Features     []string `json:"features"`
+	Name        string   `json:"name"`
+	DisplayName string   `json:"display_name"`
+	Provider    string   `json:"provider"`
+	MaxTokens   int      `json:"max_tokens"`
+	CostPer1000 float64  `json:"cost_per_1000"`
+	Features    []string `json:"features"`
 }
 
 // DocumentContextService provides document retrieval and context injection for agents

@@ -40,6 +40,11 @@ data:
   LOG_MAX_AGE: "7"
   LOG_COMPRESS: "true"
 
+  # DeepLake Configuration
+  DEEPLAKE_BASE_URL: "http://deeplake-api.aether-be:8000"
+  DEEPLAKE_TIMEOUT: "30"
+  DEEPLAKE_DEFAULT_DATASET: "documents"
+
   # MCP Tool Integration Configuration
   MCP_SERVER_URL: "http://napkin-mcp.tas-mcp-servers.svc.cluster.local:8087"
   MCP_TIMEOUT: "120"

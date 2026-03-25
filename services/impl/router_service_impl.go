@@ -21,7 +21,7 @@ import (
 type routerServiceImpl struct {
 	config           *config.RouterConfig
 	httpClient       *http.Client
-	streamClient     *http.Client // No total timeout, for SSE streaming
+	streamClient     *http.Client   // No total timeout, for SSE streaming
 	modelLimitsCache map[string]int // Cache for model max_output_tokens
 }
 
@@ -65,8 +65,9 @@ func (s *routerServiceImpl) SendRequest(ctx context.Context, agentConfig models.
 	// Convert messages
 	for i, msg := range messages {
 		request.Messages[i] = RouterMessage{
-			Role:    msg.Role,
-			Content: msg.Content,
+			Role:     msg.Role,
+			Content:  msg.Content,
+			Metadata: msg.Metadata,
 		}
 	}
 
@@ -179,19 +180,19 @@ func (s *routerServiceImpl) SendRequest(ctx context.Context, agentConfig models.
 			CostUSD:         calculateCostUSD(routerResp.Usage, routerResp.Model),
 			ResponseTimeMs:  int(responseTime.Milliseconds()),
 			Metadata: map[string]interface{}{
-				"request_id":         routerResp.ID,
-				"finish_reason":      routerResp.Choices[0].FinishReason,
-				"prompt_tokens":      routerResp.Usage.PromptTokens,
-				"completion_tokens":  routerResp.Usage.CompletionTokens,
+				"request_id":        routerResp.ID,
+				"finish_reason":     routerResp.Choices[0].FinishReason,
+				"prompt_tokens":     routerResp.Usage.PromptTokens,
+				"completion_tokens": routerResp.Usage.CompletionTokens,
 				"created":           routerResp.Created,
 				"router_metadata":   routerResp.RouterMetadata,
 				// Enhanced reliability metadata
-				"retry_attempts":    reliabilityMetadata.RetryAttempts,
-				"fallback_used":     reliabilityMetadata.FallbackUsed,
-				"failed_providers":  reliabilityMetadata.FailedProviders,
-				"total_retry_time":  reliabilityMetadata.TotalRetryTime,
-				"provider_latency":  reliabilityMetadata.ProviderLatency,
-				"routing_reason":    reliabilityMetadata.RoutingReason,
+				"retry_attempts":   reliabilityMetadata.RetryAttempts,
+				"fallback_used":    reliabilityMetadata.FallbackUsed,
+				"failed_providers": reliabilityMetadata.FailedProviders,
+				"total_retry_time": reliabilityMetadata.TotalRetryTime,
+				"provider_latency": reliabilityMetadata.ProviderLatency,
+				"routing_reason":   reliabilityMetadata.RoutingReason,
 			},
 		}
 
@@ -235,6 +236,7 @@ func (s *routerServiceImpl) SendRequestWithTools(ctx context.Context, agentConfi
 			Role:       msg.Role,
 			Content:    msg.Content,
 			ToolCallID: msg.ToolCallID,
+			Metadata:   msg.Metadata,
 		}
 		// Convert tool calls
 		if len(msg.ToolCalls) > 0 {
@@ -498,7 +500,7 @@ func (s *routerServiceImpl) GetAvailableProviders(ctx context.Context) ([]servic
 			Models:      []string{}, // We'll populate this with known models
 			Features:    []string{"chat_completions"},
 		}
-		
+
 		// Add known models for each provider
 		switch providerName {
 		case "openai":
@@ -542,12 +544,12 @@ func (s *routerServiceImpl) GetProviderModels(ctx context.Context, provider stri
 	models := make([]services.Model, len(providerResp.Models))
 	for i, m := range providerResp.Models {
 		models[i] = services.Model{
-			Name:         m.Name,
-			DisplayName:  m.DisplayName,
-			Provider:     provider,
-			MaxTokens:    m.MaxTokens,
-			CostPer1000:  m.CostPer1000,
-			Features:     m.Features,
+			Name:        m.Name,
+			DisplayName: m.DisplayName,
+			Provider:    provider,
+			MaxTokens:   m.MaxTokens,
+			CostPer1000: m.CostPer1000,
+			Features:    m.Features,
 		}
 	}
 
@@ -594,26 +596,27 @@ type RouterRequest struct {
 // RetryConfig defines retry behavior for failed requests
 // Note: BaseDelay and MaxDelay use time.Duration (int64 nanoseconds) to match LLM router expectations
 type RetryConfig struct {
-	MaxAttempts     int           `json:"max_attempts"`                   // Maximum retry attempts (1-5)
-	BackoffType     string        `json:"backoff_type,omitempty"`         // "exponential" or "linear"
-	BaseDelay       time.Duration `json:"base_delay,omitempty"`           // Base delay between retries
-	MaxDelay        time.Duration `json:"max_delay,omitempty"`            // Maximum delay cap
-	RetryableErrors []string      `json:"retryable_errors,omitempty"`     // Error patterns that trigger retries
+	MaxAttempts     int           `json:"max_attempts"`               // Maximum retry attempts (1-5)
+	BackoffType     string        `json:"backoff_type,omitempty"`     // "exponential" or "linear"
+	BaseDelay       time.Duration `json:"base_delay,omitempty"`       // Base delay between retries
+	MaxDelay        time.Duration `json:"max_delay,omitempty"`        // Maximum delay cap
+	RetryableErrors []string      `json:"retryable_errors,omitempty"` // Error patterns that trigger retries
 }
 
 // FallbackConfig defines automatic fallback to alternative providers
 type FallbackConfig struct {
-	Enabled            bool     `json:"enabled"`                               // Enable fallback to healthy providers
-	PreferredChain     []string `json:"preferred_chain,omitempty"`            // Custom fallback order (provider names)
-	MaxCostIncrease    *float64 `json:"max_cost_increase,omitempty"`          // Max cost increase allowed for fallback
-	RequireSameFeatures bool    `json:"require_same_features,omitempty"`      // Whether fallback providers must support same features
+	Enabled             bool     `json:"enabled"`                         // Enable fallback to healthy providers
+	PreferredChain      []string `json:"preferred_chain,omitempty"`       // Custom fallback order (provider names)
+	MaxCostIncrease     *float64 `json:"max_cost_increase,omitempty"`     // Max cost increase allowed for fallback
+	RequireSameFeatures bool     `json:"require_same_features,omitempty"` // Whether fallback providers must support same features
 }
 
 type RouterMessage struct {
-	Role       string            `json:"role"`
-	Content    string            `json:"content"`
-	ToolCallID string            `json:"tool_call_id,omitempty"`
-	ToolCalls  []RouterToolCall  `json:"tool_calls,omitempty"`
+	Role       string                 `json:"role"`
+	Content    string                 `json:"content"`
+	ToolCallID string                 `json:"tool_call_id,omitempty"`
+	ToolCalls  []RouterToolCall       `json:"tool_calls,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // RouterTool represents a tool definition sent to the LLM router
@@ -683,8 +686,8 @@ type ProviderInfo struct {
 }
 
 type ProviderResponse struct {
-	Name    string      `json:"name"`
-	Models  []ModelInfo `json:"models"`
+	Name   string      `json:"name"`
+	Models []ModelInfo `json:"models"`
 }
 
 type ModelInfo struct {
@@ -703,19 +706,19 @@ type ActualProviderResponse struct {
 }
 
 type ProviderCapabilities struct {
-	ProviderName     string              `json:"provider_name"`
-	SupportedModels  []SupportedModel    `json:"supported_models"`
-	MaxContextWindow int                 `json:"max_context_window"`
+	ProviderName     string           `json:"provider_name"`
+	SupportedModels  []SupportedModel `json:"supported_models"`
+	MaxContextWindow int              `json:"max_context_window"`
 }
 
 type SupportedModel struct {
-	Name            string  `json:"name"`
-	DisplayName     string  `json:"display_name"`
-	MaxContextWindow int    `json:"max_context_window"`
-	MaxOutputTokens int     `json:"max_output_tokens"`
-	InputCostPer1K  float64 `json:"input_cost_per_1k"`
-	OutputCostPer1K float64 `json:"output_cost_per_1k"`
-	ProviderModelID string  `json:"provider_model_id"`
+	Name             string  `json:"name"`
+	DisplayName      string  `json:"display_name"`
+	MaxContextWindow int     `json:"max_context_window"`
+	MaxOutputTokens  int     `json:"max_output_tokens"`
+	InputCostPer1K   float64 `json:"input_cost_per_1k"`
+	OutputCostPer1K  float64 `json:"output_cost_per_1k"`
+	ProviderModelID  string  `json:"provider_model_id"`
 }
 
 // Helper functions
@@ -742,7 +745,7 @@ type ReliabilityMetadata struct {
 	RetryAttempts   int      `json:"retry_attempts"`
 	FallbackUsed    bool     `json:"fallback_used"`
 	FailedProviders []string `json:"failed_providers"`
-	TotalRetryTime  int      `json:"total_retry_time"`  // milliseconds
+	TotalRetryTime  int      `json:"total_retry_time"` // milliseconds
 	ProviderLatency int      `json:"provider_latency"` // milliseconds
 	RoutingReason   []string `json:"routing_reason"`
 }
@@ -871,10 +874,10 @@ type StreamDelta struct {
 
 // StreamToolCallDelta represents an incremental tool call fragment in SSE
 type StreamToolCallDelta struct {
-	Index    int                   `json:"index"`
-	ID       string                `json:"id,omitempty"`
-	Type     string                `json:"type,omitempty"`
-	Function *StreamFunctionDelta  `json:"function,omitempty"`
+	Index    int                  `json:"index"`
+	ID       string               `json:"id,omitempty"`
+	Type     string               `json:"type,omitempty"`
+	Function *StreamFunctionDelta `json:"function,omitempty"`
 }
 
 // StreamFunctionDelta represents incremental function call data

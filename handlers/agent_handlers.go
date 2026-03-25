@@ -278,9 +278,9 @@ func (h *AgentHandlers) GetAgentReliabilityMetrics(c *gin.Context) {
 		"fallback_usage_rate":   0.05,
 		"avg_response_time_ms":  250,
 		"last_30_days": gin.H{
-			"executions":      75,
-			"success_rate":    0.96,
-			"avg_cost_usd":    0.002,
+			"executions":   75,
+			"success_rate": 0.96,
+			"avg_cost_usd": 0.002,
 		},
 	}
 
@@ -328,23 +328,23 @@ func (h *AgentHandlers) ValidateAgentConfig(c *gin.Context) {
 // GetUserStats returns statistics for the current user
 func (h *AgentHandlers) GetUserStats(c *gin.Context) {
 	userID, _ := c.Get("user_id")
-	
+
 	// For now, return basic stats structure
 	stats := gin.H{
-		"total_agents":       0,
-		"total_executions":   0,
-		"total_cost_usd":     0.0,
+		"total_agents":         0,
+		"total_executions":     0,
+		"total_cost_usd":       0.0,
 		"avg_response_time_ms": 0,
-		"executions_today":   0,
-		"executions_week":    0,
-		"executions_month":   0,
-		"cost_today":         0.0,
-		"cost_week":          0.0,
-		"cost_month":         0.0,
-		"active_sessions":    0,
-		"user_id":            userID,
+		"executions_today":     0,
+		"executions_week":      0,
+		"executions_month":     0,
+		"cost_today":           0.0,
+		"cost_week":            0.0,
+		"cost_month":           0.0,
+		"active_sessions":      0,
+		"user_id":              userID,
 	}
-	
+
 	c.JSON(http.StatusOK, stats)
 }
 
@@ -355,9 +355,9 @@ func (h *AgentHandlers) GetAgentConfigTemplates(c *gin.Context) {
 			"name":        "High Reliability Agent",
 			"description": "Optimized for maximum uptime with aggressive retry and fallback",
 			"llm_config": map[string]interface{}{
-				"provider":      "openai",
-				"model":         "gpt-3.5-turbo",
-				"optimize_for":  "reliability",
+				"provider":     "openai",
+				"model":        "gpt-3.5-turbo",
+				"optimize_for": "reliability",
 			},
 		},
 		"cost_optimized": map[string]interface{}{
@@ -583,12 +583,21 @@ func (h *AgentHandlers) ExecuteInternalAgent(c *gin.Context) {
 	}
 
 	// Build messages for router service
-	messages := []services.Message{
-		{
-			Role:    "system",
-			Content: systemPrompt,
-		},
+	// System message with document context is marked as pre-scanned since document
+	// content was already security-scanned at ingestion time (AudiModal/DeepLake).
+	systemMsg := services.Message{
+		Role:    "system",
+		Content: systemPrompt,
 	}
+	if contextMetadata != nil {
+		if enabled, ok := contextMetadata["knowledge_enabled"].(bool); ok && enabled {
+			systemMsg.Metadata = map[string]interface{}{
+				"trust":       "pre_scanned",
+				"scan_source": "deeplake",
+			}
+		}
+	}
+	messages := []services.Message{systemMsg}
 
 	// Add conversation history if provided
 	if history, exists := rawReq["history"]; exists {
@@ -647,6 +656,7 @@ func (h *AgentHandlers) ExecuteInternalAgent(c *gin.Context) {
 	totalDuration := int(time.Since(startTime).Milliseconds())
 
 	if err != nil {
+		log.Printf("[ERROR] Internal agent %s execution failed (useMCP=%v, duration=%dms): %v", agentID, useMCPTools, totalDuration, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Execution failed", "details": err.Error()})
 		return
 	}
@@ -1026,12 +1036,21 @@ func (h *AgentHandlers) ExecuteAgent(c *gin.Context) {
 	tenantStr, _ := tenantID.(string)
 
 	// Build messages for router service
-	messages := []services.Message{
-		{
-			Role:    "system",
-			Content: systemPrompt,
-		},
+	// System message with document context is marked as pre-scanned since document
+	// content was already security-scanned at ingestion time.
+	systemMsg := services.Message{
+		Role:    "system",
+		Content: systemPrompt,
 	}
+	if contextMetadata != nil {
+		if enabled, ok := contextMetadata["knowledge_enabled"].(bool); ok && enabled {
+			systemMsg.Metadata = map[string]interface{}{
+				"trust":       "pre_scanned",
+				"scan_source": "deeplake",
+			}
+		}
+	}
+	messages := []services.Message{systemMsg}
 
 	// Load memory context if memory is enabled and session ID is provided
 	var memoryContextAdded bool
@@ -1197,10 +1216,10 @@ func (h *AgentHandlers) ExecuteAgent(c *gin.Context) {
 			Role:      "assistant",
 			Content:   response.Content,
 			Metadata: map[string]interface{}{
-				"model":      response.Model,
-				"provider":   response.Provider,
-				"tokens":     response.TokenUsage,
-				"cost_usd":   response.CostUSD,
+				"model":    response.Model,
+				"provider": response.Provider,
+				"tokens":   response.TokenUsage,
+				"cost_usd": response.CostUSD,
 			},
 		}
 		if err := h.memoryService.AddMemory(c.Request.Context(), assistantMemoryReq); err != nil {
@@ -1795,7 +1814,7 @@ func (h *AgentHandlers) executeWithToolLoop(ctx context.Context, agent *models.A
 	}
 
 	toolHint := fmt.Sprintf(
-		"\n\n--- AVAILABLE TOOLS ---\nYou have access to the following tools: %s. "+
+		"\n\n=== AVAILABLE TOOLS ===\nYou have access to the following tools: %s. "+
 			"You MUST use the available tools as part of completing your task. "+
 			"After calling a tool, include the tool's result (such as download URLs or file paths) in your final response so the user can access it.",
 		strings.Join(toolNames, ", "))
@@ -1913,11 +1932,16 @@ func (h *AgentHandlers) executeWithToolLoop(ctx context.Context, agent *models.A
 				}
 			}
 
-			// Add tool result message
+			// Add tool result message — mark as pre-scanned since MCP tool
+			// output comes from internal TAS services already scanned at ingestion.
 			toolMsg := services.Message{
 				Role:       "tool",
 				Content:    resultContent,
 				ToolCallID: tc.ID,
+				Metadata: map[string]interface{}{
+					"trust":       "pre_scanned",
+					"scan_source": "mcp",
+				},
 			}
 			messages = append(messages, toolMsg)
 		}
@@ -1930,4 +1954,3 @@ func (h *AgentHandlers) executeWithToolLoop(ctx context.Context, agent *models.A
 	}
 	return nil, fmt.Errorf("[MCP-TOOLS] no response after %d iterations", maxIterations)
 }
-
