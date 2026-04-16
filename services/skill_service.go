@@ -16,5 +16,6 @@ type SkillService interface {
 	Update(ctx context.Context, id uuid.UUID, req models.UpdateSkillRequest) (*models.Skill, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	ResolveForAgent(ctx context.Context, agent *models.Agent) ([]models.Skill, error)
+	ResolveByIDs(ctx context.Context, ids []string) ([]models.Skill, error)
 	SeedDefaults(ctx context.Context) error
 }

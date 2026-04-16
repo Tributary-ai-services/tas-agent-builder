@@ -639,15 +639,44 @@ func (h *AgentHandlers) ExecuteInternalAgent(c *gin.Context) {
 	}
 	log.Printf("[DEBUG] === END INTERNAL AGENT MESSAGES DEBUG ===")
 
+	// Extract requested skill IDs from the context map (passed by aether-be when user selects skills)
+	var requestedSkillIDs []string
+	if ctxRaw, exists := rawReq["context"]; exists {
+		if ctxMap, ok := ctxRaw.(map[string]interface{}); ok {
+			if skillIDsRaw, exists := ctxMap["skill_ids"]; exists {
+				if skillIDsSlice, ok := skillIDsRaw.([]interface{}); ok {
+					for _, id := range skillIDsSlice {
+						if idStr, ok := id.(string); ok {
+							requestedSkillIDs = append(requestedSkillIDs, idStr)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Check if agent uses MCP strategy, has skills, and MCP is enabled
+	// Also activate MCP if the caller explicitly requested skills
 	useMCPTools := h.mcpEnabled && h.mcpContextService != nil &&
-		(h.getContextStrategy(agent) == models.ContextStrategyMCP || h.agentHasSkills(agent))
+		(h.getContextStrategy(agent) == models.ContextStrategyMCP || h.agentHasSkills(agent) || len(requestedSkillIDs) > 0)
 
 	var response *services.RouterResponse
 
 	if useMCPTools {
-		log.Printf("[MCP-TOOLS] Internal agent %s uses MCP/skills, executing with tool loop", agentID)
-		response, err = h.executeWithToolLoop(c.Request.Context(), agent, messages, userUUID)
+		if len(requestedSkillIDs) > 0 {
+			log.Printf("[MCP-TOOLS] Internal agent %s: caller requested %d skills: %v", agentID, len(requestedSkillIDs), requestedSkillIDs)
+			// Resolve tools from the explicitly requested skills
+			tools, toolRouting, resolveErr := h.resolveToolsForSkillIDs(c.Request.Context(), requestedSkillIDs)
+			if resolveErr != nil || len(tools) == 0 {
+				log.Printf("[MCP-TOOLS] Failed to resolve requested skills (err=%v, tools=%d), falling back to agent skills", resolveErr, len(tools))
+				response, err = h.executeWithToolLoop(c.Request.Context(), agent, messages, userUUID)
+			} else {
+				response, err = h.executeWithToolLoopUsingTools(c.Request.Context(), agent, messages, userUUID, tools, toolRouting)
+			}
+		} else {
+			log.Printf("[MCP-TOOLS] Internal agent %s uses MCP/skills, executing with tool loop", agentID)
+			response, err = h.executeWithToolLoop(c.Request.Context(), agent, messages, userUUID)
+		}
 	} else {
 		response, err = h.routerService.SendRequest(c.Request.Context(), agent.LLMConfig, messages, userUUID)
 	}
@@ -1620,6 +1649,69 @@ func (h *AgentHandlers) resolveToolsForAgent(ctx context.Context, agent *models.
 	return allTools, toolRouting, nil
 }
 
+// resolveToolsForSkillIDs resolves MCP tools from a list of skill IDs/names
+// This is used when the caller explicitly requests specific skills (e.g., notebook chat with selected skills)
+func (h *AgentHandlers) resolveToolsForSkillIDs(ctx context.Context, skillIDs []string) ([]services.ToolDefinition, map[string]toolRoutingInfo, error) {
+	if h.skillService == nil {
+		return nil, nil, fmt.Errorf("skill service not available")
+	}
+
+	skills, err := h.skillService.ResolveByIDs(ctx, skillIDs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to resolve skills by IDs: %w", err)
+	}
+
+	if len(skills) == 0 {
+		log.Printf("[SKILLS] No skills resolved from IDs: %v", skillIDs)
+		return nil, nil, nil
+	}
+
+	var allTools []services.ToolDefinition
+	toolRouting := make(map[string]toolRoutingInfo)
+	seen := make(map[string]bool)
+
+	for _, skill := range skills {
+		if skill.Type != models.SkillTypeMCP || skill.MCPServerURL == "" {
+			continue
+		}
+
+		log.Printf("[SKILLS] Discovering tools from requested skill %q (server: %s)", skill.Name, skill.MCPServerURL)
+
+		var allowedTools []string
+		if skill.MCPToolNames != nil {
+			json.Unmarshal(skill.MCPToolNames, &allowedTools)
+		}
+		allowedSet := make(map[string]bool)
+		for _, t := range allowedTools {
+			allowedSet[t] = true
+		}
+
+		tools, err := h.discoverToolsFromServer(ctx, skill.MCPServerURL)
+		if err != nil {
+			log.Printf("[SKILLS] Failed to discover tools from %s: %v", skill.MCPServerURL, err)
+			continue
+		}
+
+		for _, tool := range tools {
+			if len(allowedSet) > 0 && !allowedSet[tool.Function.Name] {
+				continue
+			}
+			if !seen[tool.Function.Name] {
+				seen[tool.Function.Name] = true
+				allTools = append(allTools, tool)
+				toolRouting[tool.Function.Name] = toolRoutingInfo{
+					ServerURL:    skill.MCPServerURL,
+					ServerID:     skill.MCPServerID,
+					ConnectionID: skill.MCPConnectionID,
+				}
+			}
+		}
+	}
+
+	log.Printf("[SKILLS] Resolved %d tools from %d requested skill IDs", len(allTools), len(skillIDs))
+	return allTools, toolRouting, nil
+}
+
 // discoverToolsFromServer discovers tools from an MCP server URL
 func (h *AgentHandlers) discoverToolsFromServer(ctx context.Context, serverURL string) ([]services.ToolDefinition, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", serverURL+"/mcp/tools/list", nil)
@@ -1798,6 +1890,11 @@ func (h *AgentHandlers) executeWithToolLoop(ctx context.Context, agent *models.A
 		return h.routerService.SendRequest(ctx, agent.LLMConfig, messages, userID)
 	}
 
+	return h.executeWithToolLoopUsingTools(ctx, agent, messages, userID, tools, toolRouting)
+}
+
+// executeWithToolLoopUsingTools runs the tool-calling loop with pre-resolved tools.
+func (h *AgentHandlers) executeWithToolLoopUsingTools(ctx context.Context, agent *models.Agent, messages []services.Message, userID uuid.UUID, tools []services.ToolDefinition, toolRouting map[string]toolRoutingInfo) (*services.RouterResponse, error) {
 	// Inject tool-usage instruction into the system message so the LLM knows
 	// it has tools available and should use them when the task calls for it.
 	toolNames := make([]string, len(tools))

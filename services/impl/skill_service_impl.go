@@ -233,23 +233,116 @@ func (s *skillServiceImpl) ResolveForAgent(ctx context.Context, agent *models.Ag
 	return result, nil
 }
 
+// ResolveByIDs looks up skills by their UUID or name strings
+func (s *skillServiceImpl) ResolveByIDs(ctx context.Context, ids []string) ([]models.Skill, error) {
+	var results []models.Skill
+	seen := make(map[string]bool)
+
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+
+		// Try as UUID first
+		if parsed, err := uuid.Parse(id); err == nil {
+			skill, err := s.GetByID(ctx, parsed)
+			if err == nil {
+				results = append(results, *skill)
+				continue
+			}
+		}
+
+		// Fall back to name lookup
+		skill, err := s.GetByName(ctx, id)
+		if err != nil {
+			log.Printf("[SKILLS] Warning: skill %q not found by ID or name: %v", id, err)
+			continue
+		}
+		results = append(results, *skill)
+	}
+
+	log.Printf("[SKILLS] ResolveByIDs: resolved %d/%d skills", len(results), len(ids))
+	return results, nil
+}
+
 // SeedDefaults inserts built-in skills if they don't exist
 func (s *skillServiceImpl) SeedDefaults(ctx context.Context) error {
 	defaults := []models.Skill{
 		{
-			Name:        "visual_generation",
-			DisplayName: "Visual Generation",
-			Description: "Generate diagrams, mind maps, flowcharts, and visual content from text descriptions using Napkin AI",
-			Type:        models.SkillTypeMCP,
-			Icon:        "Image",
-			Tags:        mustJSON([]string{"visual", "diagram", "chart", "mindmap", "napkin"}),
-			Keywords:    mustJSON([]string{"visual", "diagram", "chart", "graph", "mindmap", "infographic", "illustration", "draw", "flowchart"}),
+			Name:         "visual_generation",
+			DisplayName:  "Visual Generation",
+			Description:  "Generate diagrams, mind maps, flowcharts, and visual content from text descriptions using Napkin AI",
+			Type:         models.SkillTypeMCP,
+			Icon:         "Image",
+			Tags:         mustJSON([]string{"visual", "diagram", "chart", "mindmap", "napkin"}),
+			Keywords:     mustJSON([]string{"visual", "diagram", "chart", "graph", "mindmap", "infographic", "illustration", "draw", "flowchart"}),
 			MCPServerURL: "http://napkin-mcp.tas-mcp-servers.svc.cluster.local:8087",
 			MCPToolNames: mustJSON([]string{"generate_visual", "list_styles", "get_visual_status", "download_visual", "list_visuals", "delete_visual"}),
-			IsPublic:    true,
-			IsSystem:    true,
-			Author:      "TAS Platform",
-			Version:     "1.0.0",
+			IsPublic:     true,
+			IsSystem:     true,
+			Author:       "TAS Platform",
+			Version:      "1.0.0",
+		},
+		{
+			Name:         "sequential_thinking",
+			DisplayName:  "Sequential Thinking",
+			Description:  "Structured multi-step reasoning with branching, revision, and hypothesis verification for complex problems",
+			Type:         models.SkillTypeMCP,
+			Icon:         "Brain",
+			Tags:         mustJSON([]string{"reasoning", "thinking", "analysis", "problem-solving"}),
+			Keywords:     mustJSON([]string{"think", "reason", "analyze", "step-by-step", "complex", "problem", "plan", "logic"}),
+			MCPServerURL: "http://sequential-thinking-mcp.tas-mcp-servers.svc.cluster.local:8000",
+			MCPToolNames: mustJSON([]string{"sequentialthinking"}),
+			IsPublic:     true,
+			IsSystem:     true,
+			Author:       "TAS Platform",
+			Version:      "1.0.0",
+		},
+		{
+			Name:         "paper_search",
+			DisplayName:  "Paper Search",
+			Description:  "Search academic papers across arXiv, PubMed, Semantic Scholar, Google Scholar, Crossref, and more",
+			Type:         models.SkillTypeMCP,
+			Icon:         "Search",
+			Tags:         mustJSON([]string{"research", "papers", "academic", "search", "arxiv", "pubmed"}),
+			Keywords:     mustJSON([]string{"research", "paper", "academic", "arxiv", "pubmed", "scholar", "citation", "journal", "search"}),
+			MCPServerURL: "http://paper-search-mcp.tas-mcp-servers.svc.cluster.local:8000",
+			MCPToolNames: mustJSON([]string{"search_papers", "search_arxiv", "search_pubmed", "search_semantic_scholar", "search_google_scholar", "get_paper_by_doi", "download_paper"}),
+			IsPublic:     true,
+			IsSystem:     true,
+			Author:       "TAS Platform",
+			Version:      "1.0.0",
+		},
+		{
+			Name:         "context7_docs",
+			DisplayName:  "Library Docs",
+			Description:  "Look up programming library documentation and code examples for any framework or package",
+			Type:         models.SkillTypeMCP,
+			Icon:         "Code",
+			Tags:         mustJSON([]string{"documentation", "library", "code", "programming"}),
+			Keywords:     mustJSON([]string{"docs", "documentation", "library", "framework", "package", "api", "reference", "code example"}),
+			MCPServerURL: "http://context7-mcp.tas-mcp-servers.svc.cluster.local:8000",
+			MCPToolNames: mustJSON([]string{"resolve-library-id", "query-docs"}),
+			IsPublic:     true,
+			IsSystem:     true,
+			Author:       "TAS Platform",
+			Version:      "1.0.0",
+		},
+		{
+			Name:         "podcast_production",
+			DisplayName:  "Podcast Production",
+			Description:  "Generate podcasts from scripts with text-to-speech synthesis, music, and audio assembly",
+			Type:         models.SkillTypeMCP,
+			Icon:         "FileText",
+			Tags:         mustJSON([]string{"podcast", "audio", "tts", "speech"}),
+			Keywords:     mustJSON([]string{"podcast", "audio", "speech", "tts", "voice", "narrate", "record"}),
+			MCPServerURL: "http://podcast-mcp.tas-mcp-servers.svc.cluster.local:8092",
+			MCPToolNames: mustJSON([]string{"parse_script", "generate_speech", "generate_podcast", "list_voices", "list_providers"}),
+			IsPublic:     true,
+			IsSystem:     true,
+			Author:       "TAS Platform",
+			Version:      "1.0.0",
 		},
 	}
 
