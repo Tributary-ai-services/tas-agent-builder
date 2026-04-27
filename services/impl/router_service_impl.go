@@ -116,6 +116,7 @@ func (s *routerServiceImpl) SendRequest(ctx context.Context, agentConfig models.
 		client = s.streamClient
 	}
 
+	fallbackAttempted := false
 	for attempt := 0; attempt <= s.config.MaxRetries; attempt++ {
 		startTime := time.Now()
 		resp, err = client.Do(req)
@@ -138,6 +139,31 @@ func (s *routerServiceImpl) SendRequest(ctx context.Context, agentConfig models.
 				time.Sleep(time.Duration(attempt+1) * time.Second)
 				req.Body = io.NopCloser(bytes.NewBuffer(jsonData))
 				continue
+			}
+			if !fallbackAttempted && isModelGoneError(resp.StatusCode, body) {
+				if newModel := s.resolveFallbackModel(ctx, agentConfig.Provider, request.Model); newModel != "" {
+					log.Printf("[MODEL-FALLBACK] agent_model=%s deprecated, retrying with %s (tier=%s)",
+						request.Model, newModel, detectTier(request.Model))
+					fallbackAttempted = true
+					request.Model = newModel
+					jsonData, err = json.Marshal(request)
+					if err != nil {
+						return nil, fmt.Errorf("failed to remarshal request for fallback: %w", err)
+					}
+					req, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+					if err != nil {
+						return nil, fmt.Errorf("failed to rebuild request for fallback: %w", err)
+					}
+					req.Header.Set("Content-Type", "application/json")
+					if streaming {
+						req.Header.Set("Accept", "text/event-stream")
+					}
+					if s.config.APIKey != "" {
+						req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.config.APIKey))
+					}
+					req.Header.Set("X-User-ID", userID.String())
+					continue
+				}
 			}
 			return nil, fmt.Errorf("router returned status %d: %s", resp.StatusCode, string(body))
 		}
@@ -326,6 +352,7 @@ func (s *routerServiceImpl) SendRequestWithTools(ctx context.Context, agentConfi
 		client = s.streamClient
 	}
 
+	fallbackAttempted := false
 	for attempt := 0; attempt <= s.config.MaxRetries; attempt++ {
 		startTime := time.Now()
 		resp, err = client.Do(req)
@@ -347,6 +374,31 @@ func (s *routerServiceImpl) SendRequestWithTools(ctx context.Context, agentConfi
 				time.Sleep(time.Duration(attempt+1) * time.Second)
 				req.Body = io.NopCloser(bytes.NewBuffer(jsonData))
 				continue
+			}
+			if !fallbackAttempted && isModelGoneError(resp.StatusCode, body) {
+				if newModel := s.resolveFallbackModel(ctx, agentConfig.Provider, request.Model); newModel != "" {
+					log.Printf("[MODEL-FALLBACK] agent_model=%s deprecated, retrying with %s (tier=%s)",
+						request.Model, newModel, detectTier(request.Model))
+					fallbackAttempted = true
+					request.Model = newModel
+					jsonData, err = json.Marshal(request)
+					if err != nil {
+						return nil, fmt.Errorf("failed to remarshal request for fallback: %w", err)
+					}
+					req, err = http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+					if err != nil {
+						return nil, fmt.Errorf("failed to rebuild request for fallback: %w", err)
+					}
+					req.Header.Set("Content-Type", "application/json")
+					if streaming {
+						req.Header.Set("Accept", "text/event-stream")
+					}
+					if s.config.APIKey != "" {
+						req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", s.config.APIKey))
+					}
+					req.Header.Set("X-User-ID", userID.String())
+					continue
+				}
 			}
 			return nil, fmt.Errorf("router returned status %d: %s", resp.StatusCode, string(body))
 		}
