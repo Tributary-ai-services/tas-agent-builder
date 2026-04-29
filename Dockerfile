@@ -15,6 +15,9 @@ COPY . .
 # Build the application
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o agent-builder ./cmd/main.go
 
+# Build the model-migration tool used by the weekly CronJob
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o model-migrate ./cmd/model-migrate
+
 # Final stage
 FROM alpine:latest
 
@@ -23,8 +26,9 @@ RUN apk --no-cache add ca-certificates
 
 WORKDIR /root/
 
-# Copy the binary from builder stage
+# Copy the binaries from builder stage
 COPY --from=builder /app/agent-builder .
+COPY --from=builder /app/model-migrate .
 
 # Expose port
 EXPOSE 8087

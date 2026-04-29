@@ -1,0 +1,59 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: agent-builder-model-migration
+  namespace: tas-agent-builder
+  labels:
+    app: agent-builder
+    component: model-migration
+spec:
+  # Mondays 04:00 UTC — off-peak weekly sweep for deprecated llm_config.model values.
+  schedule: "0 4 * * 1"
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 900
+      ttlSecondsAfterFinished: 604800
+      template:
+        metadata:
+          labels:
+            app: agent-builder
+            component: model-migration
+        spec:
+          restartPolicy: Never
+          initContainers:
+          - name: wait-for-postgres
+            image: busybox:1.36
+            command:
+            - sh
+            - -c
+            - |
+              until nc -z postgres-shared.tas-shared 5432; do
+                echo "waiting for postgres-shared:5432"
+                sleep 2
+              done
+          - name: wait-for-router
+            image: busybox:1.36
+            command:
+            - sh
+            - -c
+            - |
+              until nc -z llm-router.tas-llm-router 8086; do
+                echo "waiting for llm-router:8086"
+                sleep 2
+              done
+          containers:
+          - name: model-migrate
+            image: agent-builder:latest
+            imagePullPolicy: IfNotPresent
+            command: ["/root/model-migrate", "--apply"]
+            envFrom:
+            - configMapRef:
+                name: agent-builder-config
+            - secretRef:
+                name: agent-builder-secret

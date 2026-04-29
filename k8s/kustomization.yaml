@@ -9,6 +9,7 @@ resources:
 - secret.yaml
 - deployment.yaml
 - service.yaml
+- cronjob-model-migration.yaml
 
 commonLabels:
   app.kubernetes.io/name: agent-builder
@@ -18,4 +19,4 @@ commonLabels:
 images:
 - name: agent-builder
   newName: registry-api.tas.scharber.com/agent-builder
-  newTag: latest
+  newTag: model-fallback-20260427211530
