@@ -225,3 +225,21 @@ make example-router
 # Run with coverage
 make test-coverage
 ```
+
+## Seeded internal agents
+
+Internal (system) agents are seeded via numbered SQL migrations and referenced by fixed UUIDs. They are read-only system tools exposed at `GET/POST /api/v1/agents/internal[/:id[/execute]]` and may be invoked cross-service (executing one creates no agent rows, so the aether-be-single-writer rule does not apply to the execute path).
+
+- `…0001` prompt assistant · `…0002`–`…0008` query assistants · `…0009`–`…0014` producer/notebook assistants
+- `…0015` **Traffic Explorer Filter Assistant** — migration `020_seed_traffic_filter_assistant.sql`. Turns a plain-English request into an AIQG Traffic Explorer display-filter DSL expression; returns `{recommendation, reasoning, comments}` JSON. Invoked from aiqg-ui via the aiqg-dashboard-be → agent-builder proxy.
+
+### Deploy
+
+After deploying this service, apply migrations so the agent row exists:
+
+```bash
+make db-migrate-up   # idempotent (ON CONFLICT); seeds …0015 from migration 020
+make db-status       # confirm 020_seed_traffic_filter_assistant is applied
+```
+
+The agent uses `provider: openai, model: gpt-4o` — the OpenAI key lives in **tas-llm-router**, not here. Next free internal-agent UUID slot is `…0016`.
