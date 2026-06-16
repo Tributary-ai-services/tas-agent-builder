@@ -232,6 +232,7 @@ Internal (system) agents are seeded via numbered SQL migrations and referenced b
 
 - `…0001` prompt assistant · `…0002`–`…0008` query assistants · `…0009`–`…0014` producer/notebook assistants
 - `…0015` **Traffic Explorer Filter Assistant** — migration `020_seed_traffic_filter_assistant.sql`. Turns a plain-English request into an AIQG Traffic Explorer display-filter DSL expression; returns `{recommendation, reasoning, comments}` JSON. Invoked from aiqg-ui via the aiqg-dashboard-be → agent-builder proxy.
+- `…0016` **AIQG Experiment Designer** — migration `021_seed_experiment_designer.sql`. Turns a plain-English A/B idea into a prefilled experiment config (cohort, override model, weights, sticky key, objective) as JSON. Invoked from the aiqg-ui Experiments page (Designer button) via the proxy.
 
 ### Deploy
 
@@ -242,4 +243,4 @@ make db-migrate-up   # idempotent (ON CONFLICT); seeds …0015 from migration 02
 make db-status       # confirm 020_seed_traffic_filter_assistant is applied
 ```
 
-The agent uses `provider: openai, model: gpt-4o` — the OpenAI key lives in **tas-llm-router**, not here. Next free internal-agent UUID slot is `…0016`.
+These agents use `provider: openai, model: gpt-4o` — the OpenAI key lives in **tas-llm-router**, not here. Next free internal-agent UUID slot is `…0017`.
