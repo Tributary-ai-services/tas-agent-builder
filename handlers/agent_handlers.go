@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Tributary-ai-services/aether-shared/go-events/payloads"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/tas-agent-builder/events"
 	"github.com/tas-agent-builder/models"
 	"github.com/tas-agent-builder/services"
 	"github.com/tas-agent-builder/services/memory"
@@ -29,6 +31,14 @@ type AgentHandlers struct {
 	mcpEnabled             bool
 	mcpMaxToolIterations   int
 	aetherBeMCPURL         string
+	eventsPublisher        *events.Publisher
+}
+
+// SetEventsPublisher wires the CloudEvents publisher used to emit agent
+// activity events. Pass nil to disable publishing — methods on Publisher
+// no-op on nil so call sites stay clean.
+func (h *AgentHandlers) SetEventsPublisher(p *events.Publisher) {
+	h.eventsPublisher = p
 }
 
 // toolRoutingInfo holds routing information for a tool invocation
@@ -108,6 +118,12 @@ func (h *AgentHandlers) CreateAgent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create agent", "details": err.Error()})
 		return
 	}
+
+	// Emit activity event
+	h.eventsPublisher.PublishCreated(c.Request.Context(), tenantStr, ownerStr, "", payloads.AgentCreated{
+		AgentID:   agent.ID.String(),
+		AgentName: agent.Name,
+	})
 
 	// Include configuration recommendations in response
 	recommendations := h.generateConfigRecommendations(req.LLMConfig)
@@ -1276,6 +1292,14 @@ func (h *AgentHandlers) ExecuteAgent(c *gin.Context) {
 			"mcp_tools_used":   useMCPTools,
 		},
 	}
+
+	// Emit activity event: agent.executed
+	h.eventsPublisher.PublishExecuted(c.Request.Context(), tenantStr, userStr, executionID.String(), payloads.AgentExecuted{
+		AgentID:    agent.ID.String(),
+		AgentName:  agent.Name,
+		DurationMS: time.Since(startTime).Milliseconds(),
+		TokensUsed: response.TokenUsage,
+	})
 
 	c.JSON(http.StatusOK, executionResponse)
 }
