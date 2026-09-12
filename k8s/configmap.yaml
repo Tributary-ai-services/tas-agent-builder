@@ -50,3 +50,6 @@ data:
   MCP_TIMEOUT: "120"
   MCP_MAX_TOOL_ITERATIONS: "10"
   MCP_ENABLED: "true"
+
+  # Kafka Configuration — enables CloudEvents publishing to tas.activity.agents
+  KAFKA_BROKERS: "kafka-shared-0.kafka-shared.tas-shared.svc.cluster.local:9092"

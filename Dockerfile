@@ -1,16 +1,17 @@
 # Build stage
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
-# Copy go mod and sum files
-COPY go.mod go.sum ./
-
-# Download dependencies
-RUN go mod download
+# Copy the shared go-events module (referenced via replace directive)
+COPY go-events/ /go-events/
 
 # Copy the source code
 COPY . .
+
+# Update replace directive to in-container path and download deps
+RUN sed -i 's|=> ../aether-shared/go-events|=> /go-events|' go.mod && \
+    go mod download
 
 # Build the application
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o agent-builder ./cmd/main.go

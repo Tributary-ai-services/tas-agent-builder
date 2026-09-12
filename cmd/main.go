@@ -15,14 +15,34 @@ import (
 	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"strings"
+
 	"github.com/tas-agent-builder/auth"
 	"github.com/tas-agent-builder/config"
+	"github.com/tas-agent-builder/events"
 	"github.com/tas-agent-builder/handlers"
 	"github.com/tas-agent-builder/models"
 	"github.com/tas-agent-builder/services"
 	"github.com/tas-agent-builder/services/impl"
 	"github.com/tas-agent-builder/services/memory"
 )
+
+// kafkaBrokersFromEnv reads KAFKA_BROKERS as a comma-separated list. Empty
+// if unset — events.New returns nil and the publisher no-ops at every call.
+func kafkaBrokersFromEnv() []string {
+	raw := strings.TrimSpace(os.Getenv("KAFKA_BROKERS"))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
 
 func main() {
 	// Load configuration
@@ -120,8 +140,18 @@ func main() {
 		log.Printf("Warning: Failed to seed default skills: %v", err)
 	}
 
+	// Initialize CloudEvents publisher (no-op if KAFKA_BROKERS unset)
+	var eventsPublisher *events.Publisher
+	if brokers := kafkaBrokersFromEnv(); len(brokers) > 0 {
+		eventsPublisher = events.New(events.Config{Brokers: brokers})
+		log.Printf("CloudEvents publisher enabled — emitting tas.activity.agents to %v", brokers)
+	} else {
+		log.Println("KAFKA_BROKERS unset — agent activity event publishing disabled")
+	}
+
 	// Initialize handlers
 	agentHandlers := handlers.NewAgentHandlers(agentService, routerService, executionService, documentContextService, cacheService, memoryService, mcpContextService, skillService, cfg.MCP.Enabled, cfg.MCP.MaxToolIterations, cfg.MCP.AetherBeMCPURL)
+	agentHandlers.SetEventsPublisher(eventsPublisher)
 	skillHandlers := handlers.NewSkillHandlers(skillService)
 	routerProxy := handlers.NewRouterProxyHandler(cfg.Router.BaseURL)
 	
