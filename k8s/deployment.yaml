@@ -17,6 +17,28 @@ spec:
         app: agent-builder
         component: api
     spec:
+      # Spread replicas across nodes (cluster gained pinova01 2026-09-21).
+      # Safe since the cluster LAN went in: measured 2026-09-21, 3,703
+      # sequential Postgres connects in 10s from the other node vs 3,793
+      # locally -- a 2.4% penalty. Over WiFi it was ~70ms per round trip.
+      #
+      # topologySpreadConstraints, not podAntiAffinity, which was measured
+      # putting both replicas on the SAME node. A rollout alone may still
+      # co-locate them; check placement and delete one pod to rebalance.
+      #
+      # ScheduleAnyway: with two nodes a hard constraint would leave a replica
+      # Pending whenever one node is down.
+      #
+      # NOTE: apply with `kubectl apply -k k8s/`, NOT `-f`. The live selector
+      # carries this kustomization's commonLabels, which the raw file lacks,
+      # so a bare -f is rejected on the immutable selector (OPS-30 Case B).
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: agent-builder
       initContainers:
       - name: wait-for-postgres
         image: busybox:1.36
