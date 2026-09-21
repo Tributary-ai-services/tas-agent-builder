@@ -20,11 +20,27 @@ depth: standard
 
 ## What this is
 
-A Go service in the Tributary AI Services (TAS) platform that stores AI agent definitions and runs them. An agent here is a database row — a name, a system prompt, a model configuration, and a list of attached skills, a skill being a stored row that names a Model Context Protocol (MCP) server and the tool names it exposes. Calling `POST /api/v1/agents/:id/execute` turns that row plus the caller's input into a chat completion, sends it to the TAS LLM Router, and, when the model asks for a tool, calls out to an MCP server over HTTP, feeds the result back into the conversation, and loops until the model stops asking or the iteration cap is reached.
+A Go service in the Tributary AI Services (TAS) platform that stores AI agent definitions and runs them. An agent here is a database row — a name, a system prompt, a model configuration, and a list of attached skills, a skill being a stored row that names a Model Context Protocol (MCP) server and the tool names it exposes. Calling `POST /api/v1/agents/:id/execute` turns that row plus the caller's input into a chat completion, sends it to the TAS LLM Router, and, when the model asks for a tool, calls out to an MCP server over HTTP, feeds the result back into the conversation, and loops until the model stops asking or the iteration cap (`MCP_MAX_TOOL_ITERATIONS`, 10 by default) is reached.
 
 Since `acd03a7` the code also emits activity events: creating an agent or executing a user agent publishes a CloudEvents 1.0 message (the Cloud Native Computing Foundation's event-envelope format) to the Kafka topic `tas.activity.agents` (`events/publisher.go:44`). That is a side channel for other TAS services. It is not part of any HTTP response, and a failed publish does not fail the request. Whether the deployed build actually emits these events today is a separate question, answered under Status & scope — at the time of writing it does not.
 
 Three things it is deliberately not. It is not a model gateway: every provider call goes to the TAS LLM Router at `{ROUTER_BASE_URL}/v1/chat/completions` (`services/impl/router_service_impl.go:93`), so this repository holds no OpenAI or Anthropic credentials and needs none. It is not a workflow engine — multi-step orchestration lives in aether-be (the Go backend of the Aether web application, and this service's main caller) and Argo Workflows, and an agent execution here is a single request-scoped tool loop. It is not an MCP host or federation gateway: it speaks plain HTTP to individual MCP servers in the `tas-mcp-servers` namespace, discovering tools with `GET {server}/mcp/tools/list` and invoking them with `POST {server}/mcp/tools/call` (`services/impl/mcp_context_impl.go:146`, `services/impl/mcp_context_impl.go:59`). It does not route through the prod-tas-mcp federation server.
+
+"Agent" in this document means any row in `agent_builder.agents`; nothing is generated at runtime. User agents and internal agents call tools through the same loop, `executeWithToolLoop` (`handlers/agent_handlers.go:1899`), which offers the model the tools of the agent's attached skills and sends each call to that skill's server. The loop is used when `MCP_ENABLED` is on and the agent has skills or the MCP context strategy; otherwise the agent answers without tools. One difference: an internal-agent execute request may also name skills in `context.skill_ids`, and those replace the agent's own skills for that call (`handlers/agent_handlers.go:662`). User-agent execution has no such override. An agent with no skills but the MCP strategy falls back to `MCP_SERVER_URL`.
+
+The five default skills seeded at startup, and the server each one calls, as written in `SeedDefaults` (`services/impl/skill_service_impl.go:270`):
+
+| Skill | MCP server (`tas-mcp-servers`) | Seeded at |
+|---|---|---|
+| `visual_generation` | `http://napkin-mcp.tas-mcp-servers.svc.cluster.local:8087` | `services/impl/skill_service_impl.go:280` |
+| `sequential_thinking` | `http://sequential-thinking-mcp.tas-mcp-servers.svc.cluster.local:8000` | `services/impl/skill_service_impl.go:295` |
+| `paper_search` | `http://paper-search-mcp.tas-mcp-servers.svc.cluster.local:8000` | `services/impl/skill_service_impl.go:310` |
+| `context7_docs` | `http://context7-mcp.tas-mcp-servers.svc.cluster.local:8000` | `services/impl/skill_service_impl.go:325` |
+| `podcast_production` | `http://podcast-mcp.tas-mcp-servers.svc.cluster.local:8092` | `services/impl/skill_service_impl.go:340` |
+
+On 2026-09-21 all five Services existed in `tas-mcp-servers` on exactly those ports. Seeding inserts a skill only when no row with that name exists and never updates one (`services/impl/skill_service_impl.go:351`), so the URL the cluster actually calls is whatever the database row holds, not necessarily the code.
+
+> [!UNVERIFIED] The `mcp_server_url` values in the shared database's `agent_builder.skills` rows were not read on 2026-09-21, because database access was denied. The running pods log `Default skill ... already exists, skipping` for all five, so the stored rows predate this commit and could differ from the table above. `context7_docs` pointed at `context7-mcp…:8000` in the 2026-08-26 capture; the other four are unconfirmed.
 
 ## Status & scope
 
