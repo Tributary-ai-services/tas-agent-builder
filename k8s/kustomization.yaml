@@ -6,7 +6,7 @@ namespace: tas-agent-builder
 resources:
 - namespace.yaml
 - configmap.yaml
-- secret.yaml
+# secret.yaml is deliberately NOT applied — see k8s/secret.example.yaml
 - deployment.yaml
 - service.yaml
 - cronjob-model-migration.yaml
