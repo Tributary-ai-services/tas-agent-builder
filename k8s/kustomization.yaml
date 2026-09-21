@@ -16,7 +16,15 @@ commonLabels:
   app.kubernetes.io/component: api
   app.kubernetes.io/part-of: tas
 
+# WARNING: this pin is what `apply -k` deploys. On 2026-09-21 it was
+# model-fallback-20260427211530, an April build predating the CloudEvents
+# publisher, while production ran tas-agent-builder:latest which contained it.
+# A routine `apply -k` for an unrelated change silently rolled production back
+# five months and stopped activity event publishing for ~2h until it was spotted.
+# Keep this pin equal to what is actually deployed, or apply -k becomes a
+# downgrade. See OPS-14 on floating tags -- :latest is itself a problem, and the
+# real fix is a rebuild tagged from a commit, which this pin should then track.
 images:
 - name: agent-builder
-  newName: registry-api.tas.scharber.com/agent-builder
-  newTag: model-fallback-20260427211530
+  newName: registry-api.tas.scharber.com/tas-agent-builder
+  newTag: latest
