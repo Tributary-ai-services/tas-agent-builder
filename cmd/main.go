@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -50,13 +51,13 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to load configuration:", err)
 	}
-	
+
 	// Initialize database connection
 	db, err := initDB(cfg.GetDatabaseDSN())
 	if err != nil {
 		log.Fatal("Failed to connect to database:", err)
 	}
-	
+
 	// Auto-migrate database schema
 	if err := db.AutoMigrate(
 		&models.Agent{},
@@ -66,7 +67,7 @@ func main() {
 	); err != nil {
 		log.Fatal("Failed to migrate database:", err)
 	}
-	
+
 	// Initialize services
 	agentService := impl.NewAgentService(db)
 	routerService := impl.NewRouterService(&cfg.Router)
@@ -154,39 +155,44 @@ func main() {
 	agentHandlers.SetEventsPublisher(eventsPublisher)
 	skillHandlers := handlers.NewSkillHandlers(skillService)
 	routerProxy := handlers.NewRouterProxyHandler(cfg.Router.BaseURL)
-	
+
+	// Space membership authority (aether-be). Agents are keyed by space but
+	// membership lives there, so isolation is enforced by asking (AB-5).
+	spaceVerifier := impl.NewSpaceVerifier(&cfg.Aether)
+	log.Printf("Space membership verification against %s", cfg.Aether.BaseURL)
+
 	// Setup router
-	router := setupRouter(agentHandlers, skillHandlers, routerProxy, cfg)
-	
+	router := setupRouter(agentHandlers, skillHandlers, routerProxy, spaceVerifier, cfg)
+
 	// Start server
 	srv := &http.Server{
 		Addr:    cfg.GetServerAddress(),
 		Handler: router,
 	}
-	
+
 	// Graceful shutdown
 	go func() {
 		log.Printf("Agent Builder server starting on %s", cfg.GetServerAddress())
 		log.Printf("Router URL: %s", cfg.Router.BaseURL)
 		log.Printf("Environment: %s", os.Getenv("ENVIRONMENT"))
-		
+
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal("Failed to start server:", err)
 		}
 	}()
-	
+
 	// Wait for interrupt signal to gracefully shutdown the server
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("Shutting down server...")
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatal("Server forced to shutdown:", err)
 	}
-	
+
 	log.Println("Server exited")
 }
 
@@ -195,32 +201,32 @@ func initDB(databaseURL string) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
-	
+
 	// Configure connection pool
 	sqlDB, err := db.DB()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get underlying sql.DB: %w", err)
 	}
-	
+
 	sqlDB.SetMaxIdleConns(10)
 	sqlDB.SetMaxOpenConns(100)
 	sqlDB.SetConnMaxLifetime(time.Hour)
-	
+
 	return db, nil
 }
 
-func setupRouter(agentHandlers *handlers.AgentHandlers, skillHandlers *handlers.SkillHandlers, routerProxy *handlers.RouterProxyHandler, cfg *config.Config) *gin.Engine {
+func setupRouter(agentHandlers *handlers.AgentHandlers, skillHandlers *handlers.SkillHandlers, routerProxy *handlers.RouterProxyHandler, spaceVerifier services.SpaceVerifier, cfg *config.Config) *gin.Engine {
 	// Set gin mode based on environment
 	if os.Getenv("ENVIRONMENT") == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
-	
+
 	router := gin.New()
-	
+
 	// Middleware
 	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
-	
+
 	// CORS middleware
 	corsConfig := cors.DefaultConfig()
 	corsConfig.AllowOrigins = []string{"http://localhost:3001", "http://localhost:5173"}
@@ -228,7 +234,7 @@ func setupRouter(agentHandlers *handlers.AgentHandlers, skillHandlers *handlers.
 	corsConfig.AllowHeaders = []string{"Origin", "Content-Type", "Authorization"}
 	corsConfig.AllowCredentials = true
 	router.Use(cors.New(corsConfig))
-	
+
 	// Health check endpoint
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -237,10 +243,10 @@ func setupRouter(agentHandlers *handlers.AgentHandlers, skillHandlers *handlers.
 			"service":   "agent-builder",
 		})
 	})
-	
+
 	// API v1 routes
 	v1 := router.Group("/api/v1")
-	
+
 	// Add authentication middleware for API routes
 	// Support multiple Keycloak realms and deployment scenarios
 	jwtValidator := auth.NewJWTValidator(cfg.Auth.JWTSecret, []string{
@@ -253,7 +259,7 @@ func setupRouter(agentHandlers *handlers.AgentHandlers, skillHandlers *handlers.
 		"http://tas-keycloak-shared:8080/realms/master",
 	})
 	v1.Use(authMiddleware(jwtValidator))
-	
+
 	// Internal agent routes (system tools) - must come BEFORE /:id routes
 	// These are available to all authenticated users
 	internalAgents := v1.Group("/agents/internal")
@@ -263,8 +269,16 @@ func setupRouter(agentHandlers *handlers.AgentHandlers, skillHandlers *handlers.
 		internalAgents.POST("/:id/execute", agentHandlers.ExecuteInternalAgent)
 	}
 
-	// Agent routes - only add routes that are actually implemented
+	// Agent routes. Everything here acts on a space-owned agent, so the
+	// caller's membership of the space they name is verified first and the
+	// verified space is what the queries filter on — not anything the request
+	// body or query string claims (AB-5).
+	//
+	// The /agents/internal group above is deliberately outside this: system
+	// agents belong to no space, are read-only, and are reachable by every
+	// authenticated user by design.
 	agents := v1.Group("/agents")
+	agents.Use(spaceContextMiddleware(spaceVerifier))
 	{
 		agents.POST("", agentHandlers.CreateAgent)
 		agents.GET("", agentHandlers.ListAgents)
@@ -277,7 +291,7 @@ func setupRouter(agentHandlers *handlers.AgentHandlers, skillHandlers *handlers.
 		agents.POST("/:id/duplicate", agentHandlers.DuplicateAgent)
 		agents.POST("/:id/execute", agentHandlers.ExecuteAgent)
 	}
-	
+
 	// Skill routes
 	skills := v1.Group("/skills")
 	{
@@ -288,19 +302,21 @@ func setupRouter(agentHandlers *handlers.AgentHandlers, skillHandlers *handlers.
 		skills.DELETE("/:id", skillHandlers.DeleteSkill)
 	}
 
-	// Additional routes that exist in handlers
-	v1.GET("/agent-reliability-metrics", agentHandlers.GetAgentReliabilityMetrics)
+	// Additional routes that exist in handlers.
+	// The reliability metrics route reads an agent, so it carries the same
+	// space check as the agent routes.
+	v1.GET("/agent-reliability-metrics", spaceContextMiddleware(spaceVerifier), agentHandlers.GetAgentReliabilityMetrics)
 	v1.POST("/validate-agent-config", agentHandlers.ValidateAgentConfig)
 	v1.GET("/agent-config-templates", agentHandlers.GetAgentConfigTemplates)
 	v1.GET("/stats/user", agentHandlers.GetUserStats)
-	
+
 	// Router proxy endpoints
 	routerGroup := v1.Group("/router")
 	{
 		routerGroup.GET("/providers", routerProxy.GetProviders)
 		routerGroup.GET("/providers/:provider/models", routerProxy.GetProviderModels)
 	}
-	
+
 	return router
 }
 
@@ -312,7 +328,7 @@ func authMiddleware(validator *auth.JWTValidator) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		
+
 		// Check for Authorization header
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
@@ -322,7 +338,7 @@ func authMiddleware(validator *auth.JWTValidator) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		
+
 		// Validate token
 		claims, err := validator.ValidateToken(authHeader)
 		if err != nil {
@@ -333,19 +349,99 @@ func authMiddleware(validator *auth.JWTValidator) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		
+
 		// Extract user context from claims
 		userID, tenantID := validator.ExtractUserContext(claims)
-		
+
 		// Set user context in Gin context
 		c.Set("user_id", userID)
+		// The raw token, so the space check can ask aether-be about THIS
+		// caller rather than about a privileged service account.
+		c.Set("access_token", bearerToken(authHeader))
 		c.Set("tenant_id", tenantID)
 		c.Set("user_email", claims.Email)
 		c.Set("user_name", claims.Name)
 		c.Set("username", claims.PreferredUsername)
-		
+
 		log.Printf("Authenticated user: %s (%s)", claims.PreferredUsername, userID)
-		
+
+		c.Next()
+	}
+}
+
+// bearerToken strips the scheme from an Authorization header value.
+func bearerToken(authHeader string) string {
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return strings.TrimSpace(authHeader)
+	}
+	return strings.TrimSpace(parts[1])
+}
+
+// spaceContextMiddleware enforces that the caller is acting inside a space
+// they belong to, and publishes that space to the handlers (AB-5).
+//
+// Agents carry a space_id, but nothing here could ever check it: this service
+// holds no membership data, so before this middleware existed every query
+// scoped by ownership alone and space_id was decoration. The caller names a
+// space in X-Space-ID; aether-be — which owns membership — is asked whether
+// this caller is in it, using the caller's own token. The header is therefore
+// never trusted, only used to say which space to ask about.
+//
+// Three refusals, deliberately distinct:
+//   - no header at all → 400, a caller that forgot to send it (a bug in the
+//     caller, not an attack)
+//   - not a member → 403
+//   - aether-be unreachable → 503, failing closed. An isolation check that
+//     could not run has not passed.
+func spaceContextMiddleware(verifier services.SpaceVerifier) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		spaceID := strings.TrimSpace(c.GetHeader("X-Space-ID"))
+		if spaceID == "" {
+			// Accept the query parameter too: it is how the frontend already
+			// addresses spaces elsewhere, and rejecting it would only push
+			// callers toward the header without improving the check, since
+			// neither is trusted.
+			spaceID = strings.TrimSpace(c.Query("space_id"))
+		}
+		if spaceID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "Space context required",
+				"details": "send the space you are acting in as the X-Space-ID header",
+			})
+			c.Abort()
+			return
+		}
+
+		spaceType := strings.TrimSpace(c.GetHeader("X-Space-Type"))
+		if spaceType == "" {
+			spaceType = strings.TrimSpace(c.Query("space_type"))
+		}
+
+		userID, _ := c.Get("user_id")
+		userStr, _ := userID.(string)
+		token, _ := c.Get("access_token")
+		tokenStr, _ := token.(string)
+
+		membership, err := verifier.VerifyMembership(c.Request.Context(), userStr, tokenStr, spaceID, spaceType)
+		if err != nil {
+			switch {
+			case errors.Is(err, services.ErrSpaceAccessDenied):
+				log.Printf("[SPACE] denied user=%s space=%s path=%s", userStr, spaceID, c.Request.URL.Path)
+				c.JSON(http.StatusForbidden, gin.H{"error": "Access to space denied"})
+			default:
+				log.Printf("[SPACE] check unavailable user=%s space=%s: %v", userStr, spaceID, err)
+				c.JSON(http.StatusServiceUnavailable, gin.H{
+					"error": "Space membership could not be verified",
+				})
+			}
+			c.Abort()
+			return
+		}
+
+		c.Set("space_id", membership.SpaceID)
+		c.Set("space_type", membership.SpaceType)
+		c.Set("space_tenant_id", membership.TenantID)
 		c.Next()
 	}
 }

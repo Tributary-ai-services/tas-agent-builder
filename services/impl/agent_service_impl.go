@@ -23,7 +23,45 @@ func NewAgentService(db *gorm.DB) services.AgentService {
 	}
 }
 
-func (s *agentServiceImpl) CreateAgent(ctx context.Context, req models.CreateAgentRequest, ownerID string, tenantID string) (*models.Agent, error) {
+// visibleToScope narrows a query to the agents the caller may READ.
+//
+// Three disjoint reasons an agent is readable:
+//   - it is the caller's own, in the space they were verified into
+//   - it is an internal system agent, which belongs to no space by design
+//   - it is public, which is an explicit choice by its owner to share it
+//     beyond their space (templates, the shared library)
+//
+// Note what this is NOT: it does not make every agent in a space readable by
+// every member. That would be a widening, and nothing here knows space roles.
+// The rule is the old ownership rule with space added as a second condition,
+// so it can only ever return a subset of what it used to.
+func visibleToScope(query *gorm.DB, scope services.AgentScope) *gorm.DB {
+	return query.Where(
+		"((owner_id = ? AND space_id = ?) OR is_internal = true OR is_public = true)",
+		scope.UserID, scope.SpaceID,
+	)
+}
+
+// writableByScope narrows a query to the agents the caller may MODIFY.
+//
+// Ownership inside the verified space, and nothing else. In particular there
+// is no is_public or is_internal escape hatch: those flags used to appear in
+// the update predicate, which made all 16 shared system agents writable — and
+// their system prompts and notebook bindings rewritable — by any authenticated
+// user (AB-5).
+func writableByScope(query *gorm.DB, scope services.AgentScope) *gorm.DB {
+	return query.Where("owner_id = ? AND space_id = ?", scope.UserID, scope.SpaceID)
+}
+
+func (s *agentServiceImpl) CreateAgent(ctx context.Context, req models.CreateAgentRequest, scope services.AgentScope, tenantID string) (*models.Agent, error) {
+	// The agent is created in the space the caller was verified into. A
+	// request naming a different space is refused rather than quietly
+	// corrected, because the two mean different things to the caller and
+	// silently moving their agent is its own kind of wrong.
+	if req.SpaceID != "" && req.SpaceID != scope.SpaceID {
+		return nil, fmt.Errorf("%w: cannot create an agent in another space", services.ErrAgentNotFound)
+	}
+
 	// Default SpaceType to personal if not specified
 	spaceType := req.SpaceType
 	if spaceType == "" {
@@ -50,20 +88,24 @@ func (s *agentServiceImpl) CreateAgent(ctx context.Context, req models.CreateAge
 	}
 
 	agent := &models.Agent{
-		ID:              uuid.New(),
-		Name:            req.Name,
-		Description:     req.Description,
-		SystemPrompt:    req.SystemPrompt,
-		LLMConfig:       req.LLMConfig,
-		OwnerID:         ownerID,
-		SpaceID:         req.SpaceID,
-		SpaceType:       spaceType,
-		Type:            agentType,
-		TenantID:        tenantID,
-		Status:          models.AgentStatusDraft,
-		IsPublic:        req.IsPublic,
-		IsTemplate:      req.IsTemplate,
-		IsInternal:      req.IsInternal,
+		ID:           uuid.New(),
+		Name:         req.Name,
+		Description:  req.Description,
+		SystemPrompt: req.SystemPrompt,
+		LLMConfig:    req.LLMConfig,
+		OwnerID:      scope.UserID,
+		SpaceID:      scope.SpaceID,
+		SpaceType:    spaceType,
+		Type:         agentType,
+		TenantID:     tenantID,
+		Status:       models.AgentStatusDraft,
+		IsPublic:     req.IsPublic,
+		IsTemplate:   req.IsTemplate,
+		// IsInternal is NOT taken from the request. Internal agents are the
+		// shared system tools every user can see and run; letting a caller
+		// mint one would be a way to plant an agent in everyone's list.
+		// They are seeded, not created through this API.
+		IsInternal:      false,
 		EnableKnowledge: enableKnowledge,
 		EnableMemory:    enableMemory,
 		DocumentContext: req.DocumentContext,
@@ -116,16 +158,14 @@ func (s *agentServiceImpl) CreateAgent(ctx context.Context, req models.CreateAge
 	return agent, nil
 }
 
-func (s *agentServiceImpl) GetAgent(ctx context.Context, id uuid.UUID, userID string) (*models.Agent, error) {
+func (s *agentServiceImpl) GetAgent(ctx context.Context, id uuid.UUID, scope services.AgentScope) (*models.Agent, error) {
 	var agent models.Agent
 
-	query := s.db.WithContext(ctx).Where("id = ?", id)
-	// Include internal agents for all users
-	query = query.Where("(owner_id = ? OR is_public = true OR is_internal = true)", userID)
-	
+	query := visibleToScope(s.db.WithContext(ctx).Where("id = ?", id), scope)
+
 	if err := query.First(&agent).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("agent not found or access denied")
+			return nil, services.ErrAgentNotFound
 		}
 		return nil, fmt.Errorf("failed to get agent: %w", err)
 	}
@@ -133,12 +173,13 @@ func (s *agentServiceImpl) GetAgent(ctx context.Context, id uuid.UUID, userID st
 	return &agent, nil
 }
 
-func (s *agentServiceImpl) GetAgentByOwner(ctx context.Context, id uuid.UUID, ownerID string) (*models.Agent, error) {
+func (s *agentServiceImpl) GetAgentByOwner(ctx context.Context, id uuid.UUID, scope services.AgentScope) (*models.Agent, error) {
 	var agent models.Agent
-	
-	if err := s.db.WithContext(ctx).Where("id = ? AND owner_id = ?", id, ownerID).First(&agent).Error; err != nil {
+
+	query := writableByScope(s.db.WithContext(ctx).Where("id = ?", id), scope)
+	if err := query.First(&agent).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("agent not found")
+			return nil, services.ErrAgentNotFound
 		}
 		return nil, fmt.Errorf("failed to get agent: %w", err)
 	}
@@ -146,13 +187,14 @@ func (s *agentServiceImpl) GetAgentByOwner(ctx context.Context, id uuid.UUID, ow
 	return &agent, nil
 }
 
-func (s *agentServiceImpl) UpdateAgent(ctx context.Context, id uuid.UUID, req models.UpdateAgentRequest, ownerID string) (*models.Agent, error) {
+func (s *agentServiceImpl) UpdateAgent(ctx context.Context, id uuid.UUID, req models.UpdateAgentRequest, scope services.AgentScope) (*models.Agent, error) {
 	var agent models.Agent
 
-	// Allow updates if user owns the agent OR if agent is internal/public (for system agents)
-	if err := s.db.WithContext(ctx).Where("id = ? AND (owner_id = ? OR is_internal = true OR is_public = true)", id, ownerID).First(&agent).Error; err != nil {
+	// Owner, in the verified space. Being public or internal is not a licence
+	// to edit — that is what made every shared agent editable by anyone.
+	if err := writableByScope(s.db.WithContext(ctx).Where("id = ?", id), scope).First(&agent).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("agent not found")
+			return nil, services.ErrAgentNotFound
 		}
 		return nil, fmt.Errorf("failed to find agent: %w", err)
 	}
@@ -183,9 +225,8 @@ func (s *agentServiceImpl) UpdateAgent(ctx context.Context, id uuid.UUID, req mo
 	if req.IsTemplate != nil {
 		updates["is_template"] = *req.IsTemplate
 	}
-	if req.IsInternal != nil {
-		updates["is_internal"] = *req.IsInternal
-	}
+	// is_internal is deliberately not updatable: an agent cannot promote
+	// itself into the shared system set. Those rows come from seed migrations.
 
 	// Knowledge configuration updates
 	if req.EnableKnowledge != nil {
@@ -236,12 +277,18 @@ func (s *agentServiceImpl) UpdateAgent(ctx context.Context, id uuid.UUID, req mo
 	return &agent, nil
 }
 
-func (s *agentServiceImpl) DeleteAgent(ctx context.Context, id uuid.UUID, ownerID string) error {
-	// Check if agent exists
+func (s *agentServiceImpl) DeleteAgent(ctx context.Context, id uuid.UUID, scope services.AgentScope) error {
+	// Confirm the caller owns this agent in the space they are acting in.
+	// This check used to be absent entirely — ownerID was accepted and never
+	// used, so any authenticated user could delete any agent, including the
+	// seeded system ones (AB-5).
 	var count int64
-	s.db.WithContext(ctx).Model(&models.Agent{}).Where("id = ?", id).Count(&count)
+	if err := writableByScope(s.db.WithContext(ctx).Model(&models.Agent{}).Where("id = ?", id), scope).
+		Count(&count).Error; err != nil {
+		return fmt.Errorf("failed to look up agent: %w", err)
+	}
 	if count == 0 {
-		return fmt.Errorf("agent not found")
+		return services.ErrAgentNotFound
 	}
 
 	// Delete related records first (executions, etc.) to avoid foreign key constraint errors
@@ -250,30 +297,29 @@ func (s *agentServiceImpl) DeleteAgent(ctx context.Context, id uuid.UUID, ownerI
 		return fmt.Errorf("failed to delete agent executions: %w", err)
 	}
 
-	// Now delete the agent itself
-	result := s.db.WithContext(ctx).Where("id = ?", id).Delete(&models.Agent{})
+	// Now delete the agent itself, under the same predicate as the check
+	// above so that the authorization and the delete cannot disagree.
+	result := writableByScope(s.db.WithContext(ctx).Where("id = ?", id), scope).Delete(&models.Agent{})
 	if result.Error != nil {
 		return fmt.Errorf("failed to delete agent: %w", result.Error)
 	}
 
 	if result.RowsAffected == 0 {
-		return fmt.Errorf("failed to delete agent")
+		return services.ErrAgentNotFound
 	}
 
 	return nil
 }
 
-func (s *agentServiceImpl) ListAgents(ctx context.Context, filter models.AgentListFilter, userID string) (*models.AgentListResponse, error) {
-	query := s.db.WithContext(ctx).Model(&models.Agent{})
+func (s *agentServiceImpl) ListAgents(ctx context.Context, filter models.AgentListFilter, scope services.AgentScope) (*models.AgentListResponse, error) {
+	query := visibleToScope(s.db.WithContext(ctx).Model(&models.Agent{}), scope)
 
-	// Include internal agents for all users, plus owned/public agents
-	query = query.Where("(owner_id = ? OR is_public = true OR is_internal = true)", userID)
-	
+	// The remaining filters narrow what is already visible. filter.SpaceID is
+	// NOT one of them: the space is the scope, so honouring a second,
+	// caller-supplied space here is at best redundant and at worst the bug
+	// this change exists to remove.
 	if filter.OwnerID != nil {
 		query = query.Where("owner_id = ?", *filter.OwnerID)
-	}
-	if filter.SpaceID != nil {
-		query = query.Where("space_id = ?", *filter.SpaceID)
 	}
 	if filter.TenantID != nil {
 		query = query.Where("tenant_id = ?", *filter.TenantID)
@@ -293,7 +339,7 @@ func (s *agentServiceImpl) ListAgents(ctx context.Context, filter models.AgentLi
 	if filter.IsInternal != nil {
 		query = query.Where("is_internal = ?", *filter.IsInternal)
 	}
-	
+
 	if filter.Search != "" {
 		searchPattern := "%" + filter.Search + "%"
 		query = query.Where("name ILIKE ? OR description ILIKE ?", searchPattern, searchPattern)
@@ -311,16 +357,16 @@ func (s *agentServiceImpl) ListAgents(ctx context.Context, filter models.AgentLi
 	if err := query.Count(&total).Error; err != nil {
 		return nil, fmt.Errorf("failed to count agents: %w", err)
 	}
-	
+
 	page := max(filter.Page, 1)
 	size := max(filter.Size, 1)
 	size = min(size, 100)
 	if filter.Size < 1 {
 		size = 20
 	}
-	
+
 	offset := (page - 1) * size
-	
+
 	var agents []models.Agent
 	if err := query.Offset(offset).Limit(size).Order("created_at DESC").Find(&agents).Error; err != nil {
 		return nil, fmt.Errorf("failed to list agents: %w", err)
@@ -334,62 +380,69 @@ func (s *agentServiceImpl) ListAgents(ctx context.Context, filter models.AgentLi
 	}, nil
 }
 
-func (s *agentServiceImpl) PublishAgent(ctx context.Context, id uuid.UUID, ownerID string) error {
-	result := s.db.WithContext(ctx).Model(&models.Agent{}).
-		Where("id = ? AND owner_id = ?", id, ownerID).
+func (s *agentServiceImpl) PublishAgent(ctx context.Context, id uuid.UUID, scope services.AgentScope) error {
+	result := writableByScope(s.db.WithContext(ctx).Model(&models.Agent{}).Where("id = ?", id), scope).
 		Updates(map[string]any{
 			"status":     models.AgentStatusPublished,
 			"updated_at": time.Now(),
 		})
-		
+
 	if result.Error != nil {
 		return fmt.Errorf("failed to publish agent: %w", result.Error)
 	}
-	
+
 	if result.RowsAffected == 0 {
-		return fmt.Errorf("agent not found or access denied")
+		return services.ErrAgentNotFound
 	}
-	
+
 	return nil
 }
 
-func (s *agentServiceImpl) UnpublishAgent(ctx context.Context, id uuid.UUID, ownerID string) error {
-	result := s.db.WithContext(ctx).Model(&models.Agent{}).
-		Where("id = ? AND owner_id = ?", id, ownerID).
+func (s *agentServiceImpl) UnpublishAgent(ctx context.Context, id uuid.UUID, scope services.AgentScope) error {
+	result := writableByScope(s.db.WithContext(ctx).Model(&models.Agent{}).Where("id = ?", id), scope).
 		Updates(map[string]any{
 			"status":     models.AgentStatusDraft,
 			"updated_at": time.Now(),
 		})
-		
+
 	if result.Error != nil {
 		return fmt.Errorf("failed to unpublish agent: %w", result.Error)
 	}
-	
+
 	if result.RowsAffected == 0 {
-		return fmt.Errorf("agent not found or access denied")
+		return services.ErrAgentNotFound
 	}
-	
+
 	return nil
 }
 
-func (s *agentServiceImpl) DuplicateAgent(ctx context.Context, sourceID uuid.UUID, newName string, userID string, tenantID string) (*models.Agent, error) {
+func (s *agentServiceImpl) DuplicateAgent(ctx context.Context, sourceID uuid.UUID, newName string, scope services.AgentScope, tenantID string) (*models.Agent, error) {
 	var sourceAgent models.Agent
-	
-	query := s.db.WithContext(ctx).Where("id = ?", sourceID)
-	query = query.Where("(owner_id = ? OR is_public = true OR is_template = true)", userID)
-	
+
+	// Readable as a source: the caller's own agent in this space, a system
+	// agent, a public one, or a template. Templates are a sharing mechanism
+	// like is_public, so they stay copyable across spaces.
+	query := s.db.WithContext(ctx).Where("id = ?", sourceID).
+		Where("((owner_id = ? AND space_id = ?) OR is_internal = true OR is_public = true OR is_template = true)",
+			scope.UserID, scope.SpaceID)
+
 	if err := query.First(&sourceAgent).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("source agent not found or access denied")
+			return nil, services.ErrAgentNotFound
 		}
 		return nil, fmt.Errorf("failed to get source agent: %w", err)
 	}
-	
+
 	newAgent := sourceAgent
 	newAgent.ID = uuid.New()
 	newAgent.Name = newName
-	newAgent.OwnerID = userID
+	newAgent.OwnerID = scope.UserID
+	// The copy lands in the caller's space, not the source's. Copying a
+	// public agent used to carry its owner's space_id across with it.
+	newAgent.SpaceID = scope.SpaceID
 	newAgent.TenantID = tenantID
+	// A copy is never a system agent, whatever it was copied from.
+	newAgent.IsInternal = false
 	newAgent.Status = models.AgentStatusDraft
 	newAgent.IsPublic = false
 	newAgent.IsTemplate = false
@@ -408,12 +461,18 @@ func (s *agentServiceImpl) DuplicateAgent(ctx context.Context, sourceID uuid.UUI
 	return &newAgent, nil
 }
 
-func (s *agentServiceImpl) GetAgentsBySpace(ctx context.Context, spaceID uuid.UUID, userID string) ([]models.Agent, error) {
+// GetAgentsBySpace returns the agents of the caller's verified space.
+//
+// It used to take a uuid.UUID, which no live space id has ever been — they are
+// opaque strings such as "space_1766596584" — so this could not be called with
+// a real space at all. The space now comes from the verified scope, which
+// removes both the type error and the question of whose space it is.
+func (s *agentServiceImpl) GetAgentsBySpace(ctx context.Context, scope services.AgentScope) ([]models.Agent, error) {
 	var agents []models.Agent
-	
-	query := s.db.WithContext(ctx).Where("space_id = ?", spaceID)
-	query = query.Where("(owner_id = ? OR is_public = true)", userID)
-	
+
+	query := s.db.WithContext(ctx).
+		Where("space_id = ? AND (owner_id = ? OR is_public = true)", scope.SpaceID, scope.UserID)
+
 	if err := query.Order("created_at DESC").Find(&agents).Error; err != nil {
 		return nil, fmt.Errorf("failed to get agents by space: %w", err)
 	}
@@ -421,14 +480,14 @@ func (s *agentServiceImpl) GetAgentsBySpace(ctx context.Context, spaceID uuid.UU
 	return agents, nil
 }
 
-func (s *agentServiceImpl) GetPublicAgents(ctx context.Context, filter models.AgentListFilter) (*models.AgentListResponse, error) {
+func (s *agentServiceImpl) GetPublicAgents(ctx context.Context, filter models.AgentListFilter, scope services.AgentScope) (*models.AgentListResponse, error) {
 	filter.IsPublic = &[]bool{true}[0]
-	return s.ListAgents(ctx, filter, "")
+	return s.ListAgents(ctx, filter, scope)
 }
 
-func (s *agentServiceImpl) GetAgentTemplates(ctx context.Context, filter models.AgentListFilter) (*models.AgentListResponse, error) {
+func (s *agentServiceImpl) GetAgentTemplates(ctx context.Context, filter models.AgentListFilter, scope services.AgentScope) (*models.AgentListResponse, error) {
 	filter.IsTemplate = &[]bool{true}[0]
-	return s.ListAgents(ctx, filter, "")
+	return s.ListAgents(ctx, filter, scope)
 }
 
 // GetInternalAgents returns all internal (system) agents available to all users

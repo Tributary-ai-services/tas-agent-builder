@@ -9,7 +9,19 @@ import (
 	"github.com/tas-agent-builder/models"
 )
 
-// TestSpaceIsolation tests space-based isolation for agents and executions
+// TestSpaceIsolation checks the SHAPE of the space fields on the models: that
+// two users get different space ids, that the space type is set, and that the
+// local helper functions below agree with the flags on a struct.
+//
+// It does not test isolation. Nothing in this file touches a database or calls
+// the agent service — canUserAccessAgent and filterAccessibleAgents are
+// declared at the bottom of this file, so it asserts a policy written for the
+// test rather than the one the queries implement. It passed for the entire
+// period in which every query ignored space_id (AB-5).
+//
+// The isolation tests that do run the real queries are in
+// services/impl/space_isolation_test.go. Keep both: this one is a cheap model
+// sanity check, that one is the boundary.
 func TestSpaceIsolation(t *testing.T) {
 	t.Run("Personal Space Isolation", func(t *testing.T) {
 		// Create two users with personal spaces

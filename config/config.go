@@ -57,8 +57,8 @@ type RouterConfig struct {
 }
 
 type AuthConfig struct {
-	JWTSecret     string   `json:"jwt_secret"`
-	JWTExpiration int      `json:"jwt_expiration"`
+	JWTSecret      string   `json:"jwt_secret"`
+	JWTExpiration  int      `json:"jwt_expiration"`
 	AllowedOrigins []string `json:"allowed_origins"`
 }
 
@@ -97,12 +97,12 @@ type AetherConfig struct {
 
 // RedisConfig holds configuration for Redis caching
 type RedisConfig struct {
-	Host              string `json:"host"`
-	Port              int    `json:"port"`
-	Password          string `json:"password"`
-	DB                int    `json:"db"`
-	ContextCacheTTL   int    `json:"context_cache_ttl"`   // TTL for document context cache in seconds
-	EnableContextCache bool  `json:"enable_context_cache"`
+	Host               string `json:"host"`
+	Port               int    `json:"port"`
+	Password           string `json:"password"`
+	DB                 int    `json:"db"`
+	ContextCacheTTL    int    `json:"context_cache_ttl"` // TTL for document context cache in seconds
+	EnableContextCache bool   `json:"enable_context_cache"`
 }
 
 func LoadConfig() (*Config, error) {
@@ -158,7 +158,12 @@ func LoadConfig() (*Config, error) {
 			Timeout: getEnvAsInt("AUDIMODAL_TIMEOUT", 30),
 		},
 		Aether: AetherConfig{
-			BaseURL: getEnv("AETHER_BASE_URL", "http://localhost:8080"),
+			// AETHER_BE_BASE_URL is what the k8s deployment actually sets;
+			// AETHER_BASE_URL is what this file has always read. Accept both,
+			// or the space membership check (and notebook retrieval, which
+			// has been silently pointing at localhost in the cluster) go
+			// nowhere.
+			BaseURL: getEnv("AETHER_BASE_URL", getEnv("AETHER_BE_BASE_URL", "http://localhost:8080")),
 			APIKey:  getEnv("AETHER_INTERNAL_API_KEY", ""),
 			Timeout: getEnvAsInt("AETHER_TIMEOUT", 30),
 		},
@@ -205,20 +210,20 @@ func validateConfig(config *Config) error {
 	if config.Database.Password == "" {
 		return fmt.Errorf("database password is required (DB_PASSWORD)")
 	}
-	
+
 	if config.Router.BaseURL == "" {
 		return fmt.Errorf("router base URL is required (ROUTER_BASE_URL)")
 	}
-	
+
 	// Router API key is optional - router may not require authentication
 	// if config.Router.APIKey == "" {
 	//	return fmt.Errorf("router API key is required (ROUTER_API_KEY)")
 	// }
-	
+
 	if config.Auth.JWTSecret == "your-secret-key-change-in-production" {
 		return fmt.Errorf("JWT secret must be changed from default value (JWT_SECRET)")
 	}
-	
+
 	return nil
 }
 

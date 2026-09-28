@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -76,6 +77,51 @@ func NewAgentHandlers(
 	}
 }
 
+// agentScope builds the authorization scope for a request: the authenticated
+// caller plus the space the space-context middleware verified them into.
+//
+// It returns false when either is missing, having already written the
+// response. Handlers on space-scoped routes must call it and bail out on
+// false — a scope with an empty SpaceID would match no agent anyway, but
+// failing loudly beats returning a confusing empty list.
+func agentScope(c *gin.Context) (services.AgentScope, bool) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+		return services.AgentScope{}, false
+	}
+	userStr, ok := userID.(string)
+	if !ok || userStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return services.AgentScope{}, false
+	}
+
+	spaceID, exists := c.Get("space_id")
+	if !exists {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Space context required"})
+		return services.AgentScope{}, false
+	}
+	spaceStr, ok := spaceID.(string)
+	if !ok || spaceStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid space context"})
+		return services.AgentScope{}, false
+	}
+
+	return services.AgentScope{UserID: userStr, SpaceID: spaceStr}, true
+}
+
+// respondAgentError maps a service error to a status code.
+//
+// Out-of-scope and non-existent agents both come back as 404: which of the two
+// it was is exactly the information a caller should not be able to harvest.
+func respondAgentError(c *gin.Context, err error, action string) {
+	if errors.Is(err, services.ErrAgentNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Agent not found"})
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": action, "details": err.Error()})
+}
+
 func (h *AgentHandlers) CreateAgent(c *gin.Context) {
 	var req models.CreateAgentRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -89,21 +135,15 @@ func (h *AgentHandlers) CreateAgent(c *gin.Context) {
 		return
 	}
 
-	ownerID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+	scope, ok := agentScope(c)
+	if !ok {
 		return
 	}
+	ownerStr := scope.UserID
 
 	tenantID, exists := c.Get("tenant_id")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Tenant ID not found in context"})
-		return
-	}
-
-	ownerStr, ok := ownerID.(string)
-	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid owner ID"})
 		return
 	}
 
@@ -113,8 +153,12 @@ func (h *AgentHandlers) CreateAgent(c *gin.Context) {
 		return
 	}
 
-	agent, err := h.agentService.CreateAgent(c.Request.Context(), req, ownerStr, tenantStr)
+	agent, err := h.agentService.CreateAgent(c.Request.Context(), req, scope, tenantStr)
 	if err != nil {
+		if errors.Is(err, services.ErrAgentNotFound) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot create an agent outside your space"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create agent", "details": err.Error()})
 		return
 	}
@@ -264,20 +308,13 @@ func (h *AgentHandlers) GetAgentReliabilityMetrics(c *gin.Context) {
 		return
 	}
 
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
-		return
-	}
-
-	userStr, ok := userID.(string)
+	scope, ok := agentScope(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 		return
 	}
 
 	// Verify agent access
-	_, err = h.agentService.GetAgent(c.Request.Context(), agentID, userStr)
+	_, err = h.agentService.GetAgent(c.Request.Context(), agentID, scope)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Agent not found"})
 		return
@@ -425,19 +462,12 @@ func (h *AgentHandlers) GetAgent(c *gin.Context) {
 		return
 	}
 
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
-		return
-	}
-
-	userStr, ok := userID.(string)
+	scope, ok := agentScope(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 		return
 	}
 
-	agent, err := h.agentService.GetAgent(c.Request.Context(), agentID, userStr)
+	agent, err := h.agentService.GetAgent(c.Request.Context(), agentID, scope)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
@@ -490,17 +520,11 @@ func (h *AgentHandlers) ExecuteInternalAgent(c *gin.Context) {
 		return
 	}
 
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
-		return
-	}
-
-	userStr, ok := userID.(string)
+	scope, ok := agentScope(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 		return
 	}
+	userStr := scope.UserID
 
 	// Parse execution request - support both simple map and structured request
 	var rawReq map[string]interface{}
@@ -750,19 +774,12 @@ func (h *AgentHandlers) UpdateAgent(c *gin.Context) {
 		return
 	}
 
-	ownerID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
-		return
-	}
-
-	ownerStr, ok := ownerID.(string)
+	scope, ok := agentScope(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid owner ID"})
 		return
 	}
 
-	agent, err := h.agentService.UpdateAgent(c.Request.Context(), agentID, req, ownerStr)
+	agent, err := h.agentService.UpdateAgent(c.Request.Context(), agentID, req, scope)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update agent", "details": err.Error()})
 		return
@@ -779,19 +796,12 @@ func (h *AgentHandlers) DeleteAgent(c *gin.Context) {
 		return
 	}
 
-	ownerID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
-		return
-	}
-
-	ownerStr, ok := ownerID.(string)
+	scope, ok := agentScope(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid owner ID"})
 		return
 	}
 
-	err = h.agentService.DeleteAgent(c.Request.Context(), agentID, ownerStr)
+	err = h.agentService.DeleteAgent(c.Request.Context(), agentID, scope)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete agent", "details": err.Error()})
 		return
@@ -803,31 +813,16 @@ func (h *AgentHandlers) DeleteAgent(c *gin.Context) {
 func (h *AgentHandlers) ListAgents(c *gin.Context) {
 	var filter models.AgentListFilter
 
+	// owner_id and tenant_id narrow the caller's own visible set; they are
+	// opaque strings, not UUIDs. space_id is accepted and ignored: the space
+	// is whichever one the caller was verified into, and reading it from the
+	// query string is the bug this replaced.
 	if ownerIDStr := c.Query("owner_id"); ownerIDStr != "" {
-		ownerID, err := uuid.Parse(ownerIDStr)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid owner_id"})
-			return
-		}
-		filter.OwnerID = &ownerID
-	}
-
-	if spaceIDStr := c.Query("space_id"); spaceIDStr != "" {
-		spaceID, err := uuid.Parse(spaceIDStr)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid space_id"})
-			return
-		}
-		filter.SpaceID = &spaceID
+		filter.OwnerID = &ownerIDStr
 	}
 
 	if tenantIDStr := c.Query("tenant_id"); tenantIDStr != "" {
-		tenantID, err := uuid.Parse(tenantIDStr)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant_id"})
-			return
-		}
-		filter.TenantID = &tenantID
+		filter.TenantID = &tenantIDStr
 	}
 
 	if statusStr := c.Query("status"); statusStr != "" {
@@ -883,19 +878,12 @@ func (h *AgentHandlers) ListAgents(c *gin.Context) {
 		filter.Size = 20
 	}
 
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
-		return
-	}
-
-	userStr, ok := userID.(string)
+	scope, ok := agentScope(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 		return
 	}
 
-	response, err := h.agentService.ListAgents(c.Request.Context(), filter, userStr)
+	response, err := h.agentService.ListAgents(c.Request.Context(), filter, scope)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list agents", "details": err.Error()})
 		return
@@ -925,19 +913,12 @@ func (h *AgentHandlers) PublishAgent(c *gin.Context) {
 		return
 	}
 
-	ownerID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
-		return
-	}
-
-	ownerStr, ok := ownerID.(string)
+	scope, ok := agentScope(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid owner ID"})
 		return
 	}
 
-	err = h.agentService.PublishAgent(c.Request.Context(), agentID, ownerStr)
+	err = h.agentService.PublishAgent(c.Request.Context(), agentID, scope)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to publish agent", "details": err.Error()})
 		return
@@ -954,19 +935,12 @@ func (h *AgentHandlers) UnpublishAgent(c *gin.Context) {
 		return
 	}
 
-	ownerID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
-		return
-	}
-
-	ownerStr, ok := ownerID.(string)
+	scope, ok := agentScope(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid owner ID"})
 		return
 	}
 
-	err = h.agentService.UnpublishAgent(c.Request.Context(), agentID, ownerStr)
+	err = h.agentService.UnpublishAgent(c.Request.Context(), agentID, scope)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to unpublish agent", "details": err.Error()})
 		return
@@ -991,9 +965,8 @@ func (h *AgentHandlers) DuplicateAgent(c *gin.Context) {
 		return
 	}
 
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+	scope, ok := agentScope(c)
+	if !ok {
 		return
 	}
 
@@ -1003,19 +976,13 @@ func (h *AgentHandlers) DuplicateAgent(c *gin.Context) {
 		return
 	}
 
-	userStr, ok := userID.(string)
-	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-		return
-	}
-
 	tenantStr, ok := tenantID.(string)
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
 		return
 	}
 
-	agent, err := h.agentService.DuplicateAgent(c.Request.Context(), sourceID, req.Name, userStr, tenantStr)
+	agent, err := h.agentService.DuplicateAgent(c.Request.Context(), sourceID, req.Name, scope, tenantStr)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to duplicate agent", "details": err.Error()})
 		return
@@ -1041,17 +1008,11 @@ func (h *AgentHandlers) ExecuteAgent(c *gin.Context) {
 		return
 	}
 
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
-		return
-	}
-
-	userStr, ok := userID.(string)
+	scope, ok := agentScope(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 		return
 	}
+	userStr := scope.UserID
 
 	// Parse execution request
 	var req models.ExecutionContextRequest
@@ -1061,7 +1022,7 @@ func (h *AgentHandlers) ExecuteAgent(c *gin.Context) {
 	}
 
 	// Verify agent access
-	agent, err := h.agentService.GetAgent(c.Request.Context(), agentID, userStr)
+	agent, err := h.agentService.GetAgent(c.Request.Context(), agentID, scope)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Agent not found"})
 		return

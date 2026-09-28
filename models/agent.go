@@ -14,12 +14,12 @@ type SpaceType string
 type AgentType string
 
 const (
-	AgentStatusDraft      AgentStatus = "draft"
-	AgentStatusPublished  AgentStatus = "published"
-	AgentStatusDisabled   AgentStatus = "disabled"
+	AgentStatusDraft     AgentStatus = "draft"
+	AgentStatusPublished AgentStatus = "published"
+	AgentStatusDisabled  AgentStatus = "disabled"
 
-	SpaceTypePersonal      SpaceType = "personal"
-	SpaceTypeOrganization  SpaceType = "organization"
+	SpaceTypePersonal     SpaceType = "personal"
+	SpaceTypeOrganization SpaceType = "organization"
 
 	AgentTypeConversational AgentType = "conversational"
 	AgentTypeQA             AgentType = "qa"
@@ -27,21 +27,21 @@ const (
 )
 
 type AgentLLMConfig struct {
-	Provider         string            `json:"provider" gorm:"not null"`
-	Model            string            `json:"model" gorm:"not null"`
-	Temperature      *float64          `json:"temperature,omitempty"`
-	MaxTokens        *int              `json:"max_tokens,omitempty"`
-	TopP             *float64          `json:"top_p,omitempty"`
-	TopK             *int              `json:"top_k,omitempty"`
-	Stop             []string          `json:"stop,omitempty"`
-	Metadata         map[string]any    `json:"metadata,omitempty"`
+	Provider    string         `json:"provider" gorm:"not null"`
+	Model       string         `json:"model" gorm:"not null"`
+	Temperature *float64       `json:"temperature,omitempty"`
+	MaxTokens   *int           `json:"max_tokens,omitempty"`
+	TopP        *float64       `json:"top_p,omitempty"`
+	TopK        *int           `json:"top_k,omitempty"`
+	Stop        []string       `json:"stop,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
 	// Enhanced reliability configuration
-	OptimizeFor      string            `json:"optimize_for,omitempty"`      // "cost", "performance", "quality"
-	RequiredFeatures []string          `json:"required_features,omitempty"` // e.g., ["functions", "vision"]
-	MaxCost          *float64          `json:"max_cost,omitempty"`          // Maximum cost threshold
-	RetryConfig      *RetryConfig      `json:"retry_config,omitempty"`      // Retry configuration
-	FallbackConfig   *FallbackConfig   `json:"fallback_config,omitempty"`   // Fallback configuration
-	Streaming        *bool             `json:"streaming,omitempty"`          // Enable SSE streaming (default true)
+	OptimizeFor      string          `json:"optimize_for,omitempty"`      // "cost", "performance", "quality"
+	RequiredFeatures []string        `json:"required_features,omitempty"` // e.g., ["functions", "vision"]
+	MaxCost          *float64        `json:"max_cost,omitempty"`          // Maximum cost threshold
+	RetryConfig      *RetryConfig    `json:"retry_config,omitempty"`      // Retry configuration
+	FallbackConfig   *FallbackConfig `json:"fallback_config,omitempty"`   // Fallback configuration
+	Streaming        *bool           `json:"streaming,omitempty"`         // Enable SSE streaming (default true)
 }
 
 // RetryConfig defines retry behavior for failed requests
@@ -55,7 +55,7 @@ type RetryConfig struct {
 
 // FallbackConfig defines automatic fallback to alternative providers
 type FallbackConfig struct {
-	Enabled             bool     `json:"enabled"`                          // Enable fallback to healthy providers
+	Enabled             bool     `json:"enabled"`                         // Enable fallback to healthy providers
 	PreferredChain      []string `json:"preferred_chain,omitempty"`       // Custom fallback order (provider names)
 	MaxCostIncrease     *float64 `json:"max_cost_increase,omitempty"`     // Max cost increase allowed for fallback
 	RequireSameFeatures bool     `json:"require_same_features,omitempty"` // Whether fallback providers must support same features
@@ -69,12 +69,12 @@ func (c *AgentLLMConfig) Scan(value interface{}) error {
 	if value == nil {
 		return nil
 	}
-	
+
 	bytes, ok := value.([]byte)
 	if !ok {
 		return json.Unmarshal([]byte(value.(string)), c)
 	}
-	
+
 	return json.Unmarshal(bytes, c)
 }
 
@@ -111,7 +111,7 @@ func HighReliabilityConfig() (*RetryConfig, *FallbackConfig) {
 	fallbackConfig := &FallbackConfig{
 		Enabled:             true,
 		MaxCostIncrease:     floatPtr(1.0), // Allow up to 100% cost increase for reliability
-		RequireSameFeatures: false,          // Allow fallback to different feature sets
+		RequireSameFeatures: false,         // Allow fallback to different feature sets
 	}
 
 	return retryConfig, fallbackConfig
@@ -184,10 +184,10 @@ const (
 // MultiPassConfig defines configuration for multi-pass document processing
 type MultiPassConfig struct {
 	Enabled           bool   `json:"enabled" gorm:"default:false"`
-	SegmentSize       int    `json:"segment_size" gorm:"default:8000"`         // Tokens per segment
-	OverlapTokens     int    `json:"overlap_tokens" gorm:"default:500"`        // Overlap between segments
-	MaxPasses         int    `json:"max_passes" gorm:"default:10"`             // Maximum segments to process
-	AggregationPrompt string `json:"aggregation_prompt,omitempty"`             // Custom prompt for aggregation
+	SegmentSize       int    `json:"segment_size" gorm:"default:8000"`  // Tokens per segment
+	OverlapTokens     int    `json:"overlap_tokens" gorm:"default:500"` // Overlap between segments
+	MaxPasses         int    `json:"max_passes" gorm:"default:10"`      // Maximum segments to process
+	AggregationPrompt string `json:"aggregation_prompt,omitempty"`      // Custom prompt for aggregation
 }
 
 // DocumentContextConfig holds all document context settings for an agent
@@ -197,9 +197,9 @@ type DocumentContextConfig struct {
 	DefaultDocuments    []uuid.UUID      `json:"default_documents,omitempty"`
 	IncludeSubNotebooks bool             `json:"include_sub_notebooks" gorm:"default:false"`
 	MaxContextTokens    int              `json:"max_context_tokens" gorm:"default:8000"`
-	TopK                int              `json:"top_k" gorm:"default:10"`           // For vector search
-	MinScore            float64          `json:"min_score" gorm:"default:0.7"`      // Minimum similarity score
-	VectorWeight        float64          `json:"vector_weight" gorm:"default:0.5"`  // For hybrid search
+	TopK                int              `json:"top_k" gorm:"default:10"`            // For vector search
+	MinScore            float64          `json:"min_score" gorm:"default:0.7"`       // Minimum similarity score
+	VectorWeight        float64          `json:"vector_weight" gorm:"default:0.5"`   // For hybrid search
 	FullDocWeight       float64          `json:"full_doc_weight" gorm:"default:0.5"` // For hybrid search
 	MultiPass           *MultiPassConfig `json:"multi_pass,omitempty"`
 }
@@ -222,9 +222,9 @@ func (c *DocumentContextConfig) Scan(value interface{}) error {
 }
 
 type Agent struct {
-	ID          uuid.UUID  `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
-	Name        string     `json:"name" gorm:"not null"`
-	Description string     `json:"description"`
+	ID          uuid.UUID `json:"id" gorm:"type:uuid;primary_key;default:gen_random_uuid()"`
+	Name        string    `json:"name" gorm:"not null"`
+	Description string    `json:"description"`
 
 	SystemPrompt string `json:"system_prompt" gorm:"not null"`
 
@@ -245,17 +245,17 @@ type Agent struct {
 	NotebookIDs datatypes.JSON `json:"notebook_ids" gorm:"type:jsonb;default:'[]'"`
 
 	// Document Context Configuration
-	EnableKnowledge     bool                   `json:"enable_knowledge" gorm:"default:true"`
-	EnableMemory        bool                   `json:"enable_memory" gorm:"default:true"`
-	DocumentContext     *DocumentContextConfig `json:"document_context,omitempty" gorm:"type:jsonb"`
+	EnableKnowledge bool                   `json:"enable_knowledge" gorm:"default:true"`
+	EnableMemory    bool                   `json:"enable_memory" gorm:"default:true"`
+	DocumentContext *DocumentContextConfig `json:"document_context,omitempty" gorm:"type:jsonb"`
 
 	Tags   datatypes.JSON `json:"tags" gorm:"type:jsonb;default:'[]'"`
 	Skills datatypes.JSON `json:"skills" gorm:"type:jsonb;default:'[]'"` // Skill name strings
 
-	TotalExecutions     int     `json:"total_executions" gorm:"default:0"`
-	TotalCostUSD        float64 `json:"total_cost_usd" gorm:"type:decimal(10,6);default:0"`
-	AvgResponseTimeMs   int     `json:"avg_response_time_ms" gorm:"default:0"`
-	LastExecutedAt      *time.Time `json:"last_executed_at"`
+	TotalExecutions   int        `json:"total_executions" gorm:"default:0"`
+	TotalCostUSD      float64    `json:"total_cost_usd" gorm:"type:decimal(10,6);default:0"`
+	AvgResponseTimeMs int        `json:"avg_response_time_ms" gorm:"default:0"`
+	LastExecutedAt    *time.Time `json:"last_executed_at"`
 
 	CreatedAt time.Time  `json:"created_at" gorm:"not null;default:now()"`
 	UpdatedAt time.Time  `json:"updated_at" gorm:"not null;default:now()"`
@@ -315,9 +315,14 @@ type AgentListResponse struct {
 }
 
 type AgentListFilter struct {
-	OwnerID    *uuid.UUID   `json:"owner_id"`
-	SpaceID    *uuid.UUID   `json:"space_id"`
-	TenantID   *uuid.UUID   `json:"tenant_id"`
+	// These three are strings, not uuid.UUID, because that is what the
+	// columns are and what the values look like: tenant ids are "tenant_…"
+	// and space ids "space_1766596584". Typing them as UUIDs meant any
+	// request that actually used them was rejected at parse time with a 400,
+	// which is why space filtering could never have worked (AB-5).
+	OwnerID    *string      `json:"owner_id"`
+	SpaceID    *string      `json:"space_id"`
+	TenantID   *string      `json:"tenant_id"`
 	Status     *AgentStatus `json:"status"`
 	SpaceType  *SpaceType   `json:"space_type"`
 	IsPublic   *bool        `json:"is_public"`
