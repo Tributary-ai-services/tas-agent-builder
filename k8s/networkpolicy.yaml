@@ -1,0 +1,46 @@
+# Restrict who can reach agent-builder (AB-5, defence in depth).
+#
+# NOT WIRED IN YET: this file is deliberately absent from kustomization.yaml,
+# so applying `-k k8s/` does nothing with it. A manifest that is not listed is
+# inert. Two things must be checked before it is added:
+#
+#   1. That this cluster enforces NetworkPolicy at all. k3s embeds a policy
+#      controller, but no policy in this namespace has ever been exercised, and
+#      an unenforced policy is a false sense of security rather than a control.
+#   2. That the allow-list below is complete. Getting it wrong silently breaks
+#      the AIQG Traffic Explorer assistant, which reaches the internal-agent
+#      execute path from the aiqg namespace.
+#
+# The isolation fix does not depend on this. Membership is verified against
+# aether-be with the caller's own token and fails closed, so a pod that reaches
+# the service still cannot act in a space it does not belong to. This only
+# narrows who can knock.
+#
+# Known callers as of 2026-09-28:
+#   aether-be  — the single writer for agent CRUD (see CLAUDE.md)
+#   aiqg       — aiqg-dashboard-be proxies POST /agents/internal/:id/execute
+#
+# Prometheus does NOT scrape this service today; if that changes, tas-shared
+# needs an entry here too.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-builder-ingress
+  namespace: tas-agent-builder
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-builder
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: aether-be
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: aiqg
+    ports:
+    - protocol: TCP
+      port: 8087
