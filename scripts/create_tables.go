@@ -44,8 +44,13 @@ func main() {
 		description TEXT,
 		system_prompt TEXT NOT NULL,
 		llm_config JSONB NOT NULL DEFAULT '{}',
-		owner_id UUID NOT NULL,
-		space_id UUID NOT NULL,
+		-- owner_id, space_id and tenant_id are opaque identifier strings, not
+		-- UUIDs: a space id looks like "space_1766596584" and a tenant id
+		-- like "tenant_8014617b-4". Declaring them UUID here contradicted
+		-- both the Go model (varchar(255)) and the live table, so a database
+		-- built by this script would have rejected every real row.
+		owner_id VARCHAR(255) NOT NULL,
+		space_id VARCHAR(255) NOT NULL,
 		tenant_id VARCHAR(255) NOT NULL,
 		status VARCHAR(50) NOT NULL DEFAULT 'draft',
 		space_type VARCHAR(50) NOT NULL,
@@ -149,6 +154,8 @@ func main() {
 	indexes := []string{
 		`CREATE INDEX IF NOT EXISTS idx_agents_owner_id ON agent_builder.agents(owner_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_agents_space_id ON agent_builder.agents(space_id)`,
+		// Matches the space-scoped predicate every agent query now uses (AB-5).
+		`CREATE INDEX IF NOT EXISTS idx_agents_owner_space ON agent_builder.agents(owner_id, space_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_agents_tenant_id ON agent_builder.agents(tenant_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_agents_status ON agent_builder.agents(status)`,
 		`CREATE INDEX IF NOT EXISTS idx_agent_executions_agent_id ON agent_builder.agent_executions(agent_id)`,

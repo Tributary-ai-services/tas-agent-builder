@@ -23,43 +23,80 @@ type MockAgentService struct {
 	mock.Mock
 }
 
-func (m *MockAgentService) CreateAgent(ctx context.Context, req models.CreateAgentRequest, ownerID uuid.UUID, tenantID string) (*models.Agent, error) {
-	args := m.Called(ctx, req, ownerID, tenantID)
+// The mock tracks the AgentService interface. It had drifted far enough that
+// this whole test package stopped compiling — every method still took
+// uuid.UUID for identifiers the interface had changed to strings — so none of
+// these tests had run for some time. They now take services.AgentScope, which
+// is the authorization scope (caller + verified space) every agent operation
+// is evaluated against (AB-5).
+
+func (m *MockAgentService) CreateAgent(ctx context.Context, req models.CreateAgentRequest, scope services.AgentScope, tenantID string) (*models.Agent, error) {
+	args := m.Called(ctx, req, scope, tenantID)
 	return args.Get(0).(*models.Agent), args.Error(1)
 }
 
-func (m *MockAgentService) GetAgent(ctx context.Context, agentID, userID uuid.UUID) (*models.Agent, error) {
-	args := m.Called(ctx, agentID, userID)
+func (m *MockAgentService) GetAgent(ctx context.Context, agentID uuid.UUID, scope services.AgentScope) (*models.Agent, error) {
+	args := m.Called(ctx, agentID, scope)
 	return args.Get(0).(*models.Agent), args.Error(1)
 }
 
-func (m *MockAgentService) UpdateAgent(ctx context.Context, agentID uuid.UUID, req models.UpdateAgentRequest, ownerID uuid.UUID) (*models.Agent, error) {
-	args := m.Called(ctx, agentID, req, ownerID)
+func (m *MockAgentService) GetAgentByOwner(ctx context.Context, agentID uuid.UUID, scope services.AgentScope) (*models.Agent, error) {
+	args := m.Called(ctx, agentID, scope)
 	return args.Get(0).(*models.Agent), args.Error(1)
 }
 
-func (m *MockAgentService) DeleteAgent(ctx context.Context, agentID, ownerID uuid.UUID) error {
-	args := m.Called(ctx, agentID, ownerID)
+func (m *MockAgentService) UpdateAgent(ctx context.Context, agentID uuid.UUID, req models.UpdateAgentRequest, scope services.AgentScope) (*models.Agent, error) {
+	args := m.Called(ctx, agentID, req, scope)
+	return args.Get(0).(*models.Agent), args.Error(1)
+}
+
+func (m *MockAgentService) DeleteAgent(ctx context.Context, agentID uuid.UUID, scope services.AgentScope) error {
+	args := m.Called(ctx, agentID, scope)
 	return args.Error(0)
 }
 
-func (m *MockAgentService) ListAgents(ctx context.Context, filter models.AgentListFilter, userID uuid.UUID) (*models.AgentListResponse, error) {
-	args := m.Called(ctx, filter, userID)
+func (m *MockAgentService) ListAgents(ctx context.Context, filter models.AgentListFilter, scope services.AgentScope) (*models.AgentListResponse, error) {
+	args := m.Called(ctx, filter, scope)
 	return args.Get(0).(*models.AgentListResponse), args.Error(1)
 }
 
-func (m *MockAgentService) PublishAgent(ctx context.Context, agentID, ownerID uuid.UUID) error {
-	args := m.Called(ctx, agentID, ownerID)
+func (m *MockAgentService) PublishAgent(ctx context.Context, agentID uuid.UUID, scope services.AgentScope) error {
+	args := m.Called(ctx, agentID, scope)
 	return args.Error(0)
 }
 
-func (m *MockAgentService) UnpublishAgent(ctx context.Context, agentID, ownerID uuid.UUID) error {
-	args := m.Called(ctx, agentID, ownerID)
+func (m *MockAgentService) UnpublishAgent(ctx context.Context, agentID uuid.UUID, scope services.AgentScope) error {
+	args := m.Called(ctx, agentID, scope)
 	return args.Error(0)
 }
 
-func (m *MockAgentService) DuplicateAgent(ctx context.Context, sourceID uuid.UUID, newName string, userID uuid.UUID, tenantID string) (*models.Agent, error) {
-	args := m.Called(ctx, sourceID, newName, userID, tenantID)
+func (m *MockAgentService) DuplicateAgent(ctx context.Context, sourceID uuid.UUID, newName string, scope services.AgentScope, tenantID string) (*models.Agent, error) {
+	args := m.Called(ctx, sourceID, newName, scope, tenantID)
+	return args.Get(0).(*models.Agent), args.Error(1)
+}
+
+func (m *MockAgentService) GetAgentsBySpace(ctx context.Context, scope services.AgentScope) ([]models.Agent, error) {
+	args := m.Called(ctx, scope)
+	return args.Get(0).([]models.Agent), args.Error(1)
+}
+
+func (m *MockAgentService) GetPublicAgents(ctx context.Context, filter models.AgentListFilter, scope services.AgentScope) (*models.AgentListResponse, error) {
+	args := m.Called(ctx, filter, scope)
+	return args.Get(0).(*models.AgentListResponse), args.Error(1)
+}
+
+func (m *MockAgentService) GetAgentTemplates(ctx context.Context, filter models.AgentListFilter, scope services.AgentScope) (*models.AgentListResponse, error) {
+	args := m.Called(ctx, filter, scope)
+	return args.Get(0).(*models.AgentListResponse), args.Error(1)
+}
+
+func (m *MockAgentService) GetInternalAgents(ctx context.Context) ([]models.Agent, error) {
+	args := m.Called(ctx)
+	return args.Get(0).([]models.Agent), args.Error(1)
+}
+
+func (m *MockAgentService) GetInternalAgent(ctx context.Context, agentID uuid.UUID) (*models.Agent, error) {
+	args := m.Called(ctx, agentID)
 	return args.Get(0).(*models.Agent), args.Error(1)
 }
 
@@ -75,6 +112,11 @@ type MockRouterService struct {
 
 func (m *MockRouterService) SendRequest(ctx context.Context, agentConfig models.AgentLLMConfig, messages []services.Message, userID uuid.UUID) (*services.RouterResponse, error) {
 	args := m.Called(ctx, agentConfig, messages, userID)
+	return args.Get(0).(*services.RouterResponse), args.Error(1)
+}
+
+func (m *MockRouterService) SendRequestWithTools(ctx context.Context, agentConfig models.AgentLLMConfig, messages []services.Message, tools []services.ToolDefinition, toolChoice string, userID uuid.UUID) (*services.RouterResponse, error) {
+	args := m.Called(ctx, agentConfig, messages, tools, toolChoice, userID)
 	return args.Get(0).(*services.RouterResponse), args.Error(1)
 }
 
@@ -99,18 +141,18 @@ func TestAgentHandlersReliabilityFeatures(t *testing.T) {
 
 	mockAgentService := new(MockAgentService)
 	mockRouterService := new(MockRouterService)
-	
+
 	h := handlers.NewAgentHandlers(mockAgentService, mockRouterService, nil, nil, nil, nil, nil, nil, false, 10, "")
 
 	t.Run("CreateAgent with reliability configuration validation", func(t *testing.T) {
 		// Setup mocks
 		mockRouterService.On("ValidateConfig", mock.Anything, mock.AnythingOfType("models.AgentLLMConfig")).Return(nil)
-		mockAgentService.On("CreateAgent", mock.Anything, mock.AnythingOfType("models.CreateAgentRequest"), mock.AnythingOfType("uuid.UUID"), mock.AnythingOfType("string")).Return(&models.Agent{
+		mockAgentService.On("CreateAgent", mock.Anything, mock.AnythingOfType("models.CreateAgentRequest"), mock.AnythingOfType("services.AgentScope"), mock.AnythingOfType("string")).Return(&models.Agent{
 			ID:   uuid.New(),
 			Name: "Test Agent",
 			LLMConfig: models.AgentLLMConfig{
 				Provider:    "openai",
-				Model:      "gpt-3.5-turbo",
+				Model:       "gpt-3.5-turbo",
 				OptimizeFor: "reliability",
 				RetryConfig: models.DefaultRetryConfig(),
 			},
@@ -123,7 +165,7 @@ func TestAgentHandlersReliabilityFeatures(t *testing.T) {
 			SystemPrompt: "You are a reliable assistant",
 			LLMConfig: models.AgentLLMConfig{
 				Provider:    "openai",
-				Model:      "gpt-3.5-turbo",
+				Model:       "gpt-3.5-turbo",
 				OptimizeFor: "reliability",
 				RetryConfig: &models.RetryConfig{
 					MaxAttempts: 3,
@@ -136,18 +178,18 @@ func TestAgentHandlersReliabilityFeatures(t *testing.T) {
 					MaxCostIncrease: floatPtr(0.5),
 				},
 			},
-			SpaceID: uuid.New(),
+			SpaceID: "space_test",
 		}
 
 		jsonBody, _ := json.Marshal(requestBody)
-		
+
 		// Create request
 		req, _ := http.NewRequest("POST", "/agents", bytes.NewBuffer(jsonBody))
 		req.Header.Set("Content-Type", "application/json")
-		
+
 		// Create response recorder
 		w := httptest.NewRecorder()
-		
+
 		// Create gin context
 		c, _ := gin.CreateTestContext(w)
 		c.Request = req
@@ -159,15 +201,15 @@ func TestAgentHandlersReliabilityFeatures(t *testing.T) {
 
 		// Assertions
 		assert.Equal(t, http.StatusCreated, w.Code)
-		
+
 		var response map[string]interface{}
 		err := json.Unmarshal(w.Body.Bytes(), &response)
 		require.NoError(t, err)
-		
+
 		// Verify response structure
 		assert.Contains(t, response, "agent")
 		assert.Contains(t, response, "recommendations")
-		
+
 		// Verify recommendations are provided
 		recommendations := response["recommendations"].(map[string]interface{})
 		assert.Contains(t, recommendations, "retry_config")
@@ -192,21 +234,21 @@ func TestAgentHandlersReliabilityFeatures(t *testing.T) {
 			SystemPrompt: "Test prompt",
 			LLMConfig: models.AgentLLMConfig{
 				Provider:    "openai",
-				Model:      "gpt-3.5-turbo",
+				Model:       "gpt-3.5-turbo",
 				OptimizeFor: "performance",
 				RetryConfig: &models.RetryConfig{
 					MaxAttempts: 2,
 					BackoffType: "linear",
 				},
 			},
-			SpaceID: uuid.New(),
+			SpaceID: "space_test",
 		}
 
 		jsonBody, _ := json.Marshal(requestBody)
-		
+
 		req, _ := http.NewRequest("POST", "/agents/validate", bytes.NewBuffer(jsonBody))
 		req.Header.Set("Content-Type", "application/json")
-		
+
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Request = req
@@ -216,11 +258,11 @@ func TestAgentHandlersReliabilityFeatures(t *testing.T) {
 
 		// Assertions
 		assert.Equal(t, http.StatusOK, w.Code)
-		
+
 		var response map[string]interface{}
 		err := json.Unmarshal(w.Body.Bytes(), &response)
 		require.NoError(t, err)
-		
+
 		assert.True(t, response["valid"].(bool))
 		assert.Contains(t, response, "recommendations")
 		assert.Contains(t, response, "providers")
@@ -243,14 +285,14 @@ func TestAgentHandlersReliabilityFeatures(t *testing.T) {
 					MaxAttempts: 10, // Invalid - too high
 				},
 			},
-			SpaceID: uuid.New(),
+			SpaceID: "space_test",
 		}
 
 		jsonBody, _ := json.Marshal(requestBody)
-		
+
 		req, _ := http.NewRequest("POST", "/agents/validate", bytes.NewBuffer(jsonBody))
 		req.Header.Set("Content-Type", "application/json")
-		
+
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Request = req
@@ -258,11 +300,11 @@ func TestAgentHandlersReliabilityFeatures(t *testing.T) {
 		h.ValidateAgentConfig(c)
 
 		assert.Equal(t, http.StatusBadRequest, w.Code)
-		
+
 		var response map[string]interface{}
 		err := json.Unmarshal(w.Body.Bytes(), &response)
 		require.NoError(t, err)
-		
+
 		assert.False(t, response["valid"].(bool))
 		assert.Contains(t, response, "error")
 
@@ -271,13 +313,17 @@ func TestAgentHandlersReliabilityFeatures(t *testing.T) {
 
 	t.Run("GetAgentReliabilityMetrics endpoint", func(t *testing.T) {
 		agentID := uuid.New()
-		userID := uuid.New()
-		
+		userID := uuid.New().String()
+		// The handler now reads a verified space from the context, so the
+		// test context must carry one as the middleware would.
+		scope := services.AgentScope{UserID: userID, SpaceID: "space_test"}
+
 		// Setup mocks
-		mockAgentService.On("GetAgent", mock.Anything, agentID, userID).Return(&models.Agent{
+		mockAgentService.On("GetAgent", mock.Anything, agentID, scope).Return(&models.Agent{
 			ID:      agentID,
 			Name:    "Test Agent",
 			OwnerID: userID,
+			SpaceID: scope.SpaceID,
 		}, nil)
 
 		// Mock reliability metrics response
@@ -291,25 +337,26 @@ func TestAgentHandlersReliabilityFeatures(t *testing.T) {
 			"fallback_usage_rate":   0.05,
 			"avg_response_time_ms":  250,
 		}
-		
+
 		mockAgentService.On("GetReliabilityMetrics", mock.Anything, agentID).Return(expectedMetrics, nil)
 
 		req, _ := http.NewRequest("GET", "/agents/"+agentID.String()+"/reliability", nil)
-		
+
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Request = req
 		c.Params = gin.Params{{Key: "id", Value: agentID.String()}}
-		c.Set("user_id", userID.String())
+		c.Set("user_id", userID)
+		c.Set("space_id", scope.SpaceID)
 
 		h.GetAgentReliabilityMetrics(c)
 
 		assert.Equal(t, http.StatusOK, w.Code)
-		
+
 		var response map[string]interface{}
 		err := json.Unmarshal(w.Body.Bytes(), &response)
 		require.NoError(t, err)
-		
+
 		assert.Equal(t, agentID.String(), response["agent_id"])
 		assert.Equal(t, 0.95, response["reliability_score"])
 		assert.Contains(t, response, "total_executions")
@@ -320,7 +367,7 @@ func TestAgentHandlersReliabilityFeatures(t *testing.T) {
 
 	t.Run("GetAgentConfigTemplates endpoint", func(t *testing.T) {
 		req, _ := http.NewRequest("GET", "/agents/templates", nil)
-		
+
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
 		c.Request = req
@@ -328,24 +375,24 @@ func TestAgentHandlersReliabilityFeatures(t *testing.T) {
 		h.GetAgentConfigTemplates(c)
 
 		assert.Equal(t, http.StatusOK, w.Code)
-		
+
 		var response map[string]interface{}
 		err := json.Unmarshal(w.Body.Bytes(), &response)
 		require.NoError(t, err)
-		
+
 		assert.Contains(t, response, "templates")
 		templates := response["templates"].(map[string]interface{})
-		
+
 		// Verify all expected templates are present
 		expectedTemplates := []string{"high_reliability", "cost_optimized", "performance"}
 		for _, templateName := range expectedTemplates {
 			assert.Contains(t, templates, templateName)
-			
+
 			template := templates[templateName].(map[string]interface{})
 			assert.Contains(t, template, "name")
 			assert.Contains(t, template, "description")
 			assert.Contains(t, template, "llm_config")
-			
+
 			llmConfig := template["llm_config"].(map[string]interface{})
 			assert.Contains(t, llmConfig, "provider")
 			assert.Contains(t, llmConfig, "model")
@@ -410,7 +457,7 @@ func TestRetryConfigValidationInHandler(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mockAgentService := new(MockAgentService)
 			mockRouterService := new(MockRouterService)
-			
+
 			h := handlers.NewAgentHandlers(mockAgentService, mockRouterService, nil, nil, nil, nil, nil, nil, false, 10, "")
 
 			// Only setup router validation mock if config should be valid
@@ -424,17 +471,17 @@ func TestRetryConfigValidationInHandler(t *testing.T) {
 				SystemPrompt: "Test prompt",
 				LLMConfig: models.AgentLLMConfig{
 					Provider:    "openai",
-					Model:      "gpt-3.5-turbo",
+					Model:       "gpt-3.5-turbo",
 					RetryConfig: tt.retryConfig,
 				},
-				SpaceID: uuid.New(),
+				SpaceID: "space_test",
 			}
 
 			jsonBody, _ := json.Marshal(requestBody)
-			
+
 			req, _ := http.NewRequest("POST", "/agents/validate", bytes.NewBuffer(jsonBody))
 			req.Header.Set("Content-Type", "application/json")
-			
+
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 			c.Request = req
@@ -442,11 +489,11 @@ func TestRetryConfigValidationInHandler(t *testing.T) {
 			h.ValidateAgentConfig(c)
 
 			assert.Equal(t, tt.expectedStatus, w.Code)
-			
+
 			var response map[string]interface{}
 			err := json.Unmarshal(w.Body.Bytes(), &response)
 			require.NoError(t, err)
-			
+
 			assert.Equal(t, tt.expectValid, response["valid"])
 
 			if tt.expectValid {
@@ -500,7 +547,7 @@ func TestFallbackConfigValidationInHandler(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			mockAgentService := new(MockAgentService)
 			mockRouterService := new(MockRouterService)
-			
+
 			h := handlers.NewAgentHandlers(mockAgentService, mockRouterService, nil, nil, nil, nil, nil, nil, false, 10, "")
 
 			if tt.expectValid {
@@ -515,17 +562,17 @@ func TestFallbackConfigValidationInHandler(t *testing.T) {
 				SystemPrompt: "Test prompt",
 				LLMConfig: models.AgentLLMConfig{
 					Provider:       "openai",
-					Model:         "gpt-3.5-turbo",
+					Model:          "gpt-3.5-turbo",
 					FallbackConfig: tt.fallbackConfig,
 				},
-				SpaceID: uuid.New(),
+				SpaceID: "space_test",
 			}
 
 			jsonBody, _ := json.Marshal(requestBody)
-			
+
 			req, _ := http.NewRequest("POST", "/agents/validate", bytes.NewBuffer(jsonBody))
 			req.Header.Set("Content-Type", "application/json")
-			
+
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 			c.Request = req
@@ -533,11 +580,11 @@ func TestFallbackConfigValidationInHandler(t *testing.T) {
 			h.ValidateAgentConfig(c)
 
 			assert.Equal(t, tt.expectedStatus, w.Code)
-			
+
 			var response map[string]interface{}
 			err := json.Unmarshal(w.Body.Bytes(), &response)
 			require.NoError(t, err)
-			
+
 			assert.Equal(t, tt.expectValid, response["valid"])
 
 			if tt.expectValid {
@@ -546,4 +593,3 @@ func TestFallbackConfigValidationInHandler(t *testing.T) {
 		})
 	}
 }
-

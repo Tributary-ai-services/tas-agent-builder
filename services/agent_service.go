@@ -2,27 +2,49 @@ package services
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 	"github.com/tas-agent-builder/models"
 )
 
+// AgentScope is the authorization scope a request acts in: who is calling and
+// which space aether-be confirmed they are a member of.
+//
+// It is an explicit parameter rather than something the store digs out of the
+// context, so that a query written later cannot quietly be written without
+// one. Every agent read and write takes it.
+type AgentScope struct {
+	// UserID is the Keycloak subject of the caller.
+	UserID string
+	// SpaceID is the verified space, exactly as aether-be returned it.
+	// Space ids are opaque strings ("space_1766596584", or a UUID for some
+	// organisation spaces) — never parse one.
+	SpaceID string
+}
+
+// ErrAgentNotFound is returned when no agent matches, whether because it does
+// not exist or because it is outside the caller's scope. The two are not
+// distinguished on purpose: telling them apart lets a caller probe for agents
+// in spaces they cannot see.
+var ErrAgentNotFound = errors.New("agent not found")
+
 type AgentService interface {
-	CreateAgent(ctx context.Context, req models.CreateAgentRequest, ownerID string, tenantID string) (*models.Agent, error)
-	GetAgent(ctx context.Context, id uuid.UUID, userID string) (*models.Agent, error)
-	GetAgentByOwner(ctx context.Context, id uuid.UUID, ownerID string) (*models.Agent, error)
-	UpdateAgent(ctx context.Context, id uuid.UUID, req models.UpdateAgentRequest, ownerID string) (*models.Agent, error)
-	DeleteAgent(ctx context.Context, id uuid.UUID, ownerID string) error
-	ListAgents(ctx context.Context, filter models.AgentListFilter, userID string) (*models.AgentListResponse, error)
+	CreateAgent(ctx context.Context, req models.CreateAgentRequest, scope AgentScope, tenantID string) (*models.Agent, error)
+	GetAgent(ctx context.Context, id uuid.UUID, scope AgentScope) (*models.Agent, error)
+	GetAgentByOwner(ctx context.Context, id uuid.UUID, scope AgentScope) (*models.Agent, error)
+	UpdateAgent(ctx context.Context, id uuid.UUID, req models.UpdateAgentRequest, scope AgentScope) (*models.Agent, error)
+	DeleteAgent(ctx context.Context, id uuid.UUID, scope AgentScope) error
+	ListAgents(ctx context.Context, filter models.AgentListFilter, scope AgentScope) (*models.AgentListResponse, error)
 
-	PublishAgent(ctx context.Context, id uuid.UUID, ownerID string) error
-	UnpublishAgent(ctx context.Context, id uuid.UUID, ownerID string) error
+	PublishAgent(ctx context.Context, id uuid.UUID, scope AgentScope) error
+	UnpublishAgent(ctx context.Context, id uuid.UUID, scope AgentScope) error
 
-	DuplicateAgent(ctx context.Context, sourceID uuid.UUID, newName string, userID string, tenantID string) (*models.Agent, error)
+	DuplicateAgent(ctx context.Context, sourceID uuid.UUID, newName string, scope AgentScope, tenantID string) (*models.Agent, error)
 
-	GetAgentsBySpace(ctx context.Context, spaceID uuid.UUID, userID string) ([]models.Agent, error)
-	GetPublicAgents(ctx context.Context, filter models.AgentListFilter) (*models.AgentListResponse, error)
-	GetAgentTemplates(ctx context.Context, filter models.AgentListFilter) (*models.AgentListResponse, error)
+	GetAgentsBySpace(ctx context.Context, scope AgentScope) ([]models.Agent, error)
+	GetPublicAgents(ctx context.Context, filter models.AgentListFilter, scope AgentScope) (*models.AgentListResponse, error)
+	GetAgentTemplates(ctx context.Context, filter models.AgentListFilter, scope AgentScope) (*models.AgentListResponse, error)
 
 	// Internal agents (system agents available to all users)
 	GetInternalAgents(ctx context.Context) ([]models.Agent, error)
