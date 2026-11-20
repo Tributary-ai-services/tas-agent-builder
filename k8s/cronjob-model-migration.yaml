@@ -49,7 +49,10 @@ spec:
               done
           containers:
           - name: model-migrate
-            image: agent-builder:latest
+            # Pinned as running (Plan #22 W0.0). Deliberately NOT named
+            # `agent-builder`, so the kustomization's images: entry for the
+            # Deployment does not rewrite it: the two run different builds.
+            image: registry-api.tas.scharber.com/agent-builder:model-fallback-20260427211530
             imagePullPolicy: IfNotPresent
             command: ["/root/model-migrate", "--apply"]
             envFrom:
