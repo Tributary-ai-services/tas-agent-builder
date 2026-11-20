@@ -362,6 +362,7 @@ func authMiddleware(validator *auth.JWTValidator) gin.HandlerFunc {
 		c.Set("user_email", claims.Email)
 		c.Set("user_name", claims.Name)
 		c.Set("username", claims.PreferredUsername)
+		c.Set("realm_roles", claims.RealmAccess.Roles)
 
 		log.Printf("Authenticated user: %s (%s)", claims.PreferredUsername, userID)
 
@@ -442,6 +443,7 @@ func spaceContextMiddleware(verifier services.SpaceVerifier) gin.HandlerFunc {
 		c.Set("space_id", membership.SpaceID)
 		c.Set("space_type", membership.SpaceType)
 		c.Set("space_tenant_id", membership.TenantID)
+		c.Set("space_organization_id", membership.OrganizationID)
 		c.Next()
 	}
 }

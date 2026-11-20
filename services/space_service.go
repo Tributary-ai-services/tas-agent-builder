@@ -20,11 +20,14 @@ var ErrSpaceCheckUnavailable = errors.New("space membership check unavailable")
 // standing in a space. It deliberately omits the space's AudiModal API key,
 // which aether-be holds and never returns.
 type SpaceMembership struct {
-	SpaceID     string   `json:"space_id"`
-	SpaceType   string   `json:"space_type"`
-	TenantID    string   `json:"tenant_id"`
-	UserRole    string   `json:"user_role"`
-	Permissions []string `json:"permissions"`
+	SpaceID   string `json:"space_id"`
+	SpaceType string `json:"space_type"`
+	TenantID  string `json:"tenant_id"`
+	// OrganizationID is the Aether Organization that owns the space via
+	// HAS_SPACE; "" for personal spaces and unlinked organization spaces.
+	OrganizationID string   `json:"organization_id"`
+	UserRole       string   `json:"user_role"`
+	Permissions    []string `json:"permissions"`
 }
 
 // SpaceVerifier answers "is this caller a member of this space?".

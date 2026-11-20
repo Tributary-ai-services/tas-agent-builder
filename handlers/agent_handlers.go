@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -107,7 +108,55 @@ func agentScope(c *gin.Context) (services.AgentScope, bool) {
 		return services.AgentScope{}, false
 	}
 
-	return services.AgentScope{UserID: userStr, SpaceID: spaceStr}, true
+	orgID, _ := c.Get("space_organization_id")
+	orgStr, _ := orgID.(string)
+
+	return services.AgentScope{
+		UserID:           userStr,
+		SpaceID:          spaceStr,
+		OrganizationID:   orgStr,
+		CanPublishPublic: hasRealmRole(c, publicAgentRole()),
+	}, true
+}
+
+// publicAgentRole is the realm role allowed to set visibility "public".
+// "admin" is the role aether-be's own admin routes require.
+func publicAgentRole() string {
+	if r := os.Getenv("PUBLIC_AGENT_ROLE"); r != "" {
+		return r
+	}
+	return "admin"
+}
+
+func hasRealmRole(c *gin.Context, role string) bool {
+	v, ok := c.Get("realm_roles")
+	if !ok {
+		return false
+	}
+	roles, _ := v.([]string)
+	for _, r := range roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+// respondVisibilityError writes the response for the three visibility
+// refusals (AB-13) and reports whether err was one of them. The codes are a
+// contract with aether-be and the aether UI.
+func respondVisibilityError(c *gin.Context, err error) bool {
+	switch {
+	case errors.Is(err, services.ErrPublicRequiresAdmin):
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error(), "code": "visibility_public_requires_admin"})
+	case errors.Is(err, services.ErrOrganizationRequiresOrgSpace):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "visibility_organization_requires_org_space"})
+	case errors.Is(err, services.ErrInvalidVisibility):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error(), "code": "visibility_invalid"})
+	default:
+		return false
+	}
+	return true
 }
 
 // respondAgentError maps a service error to a status code.
@@ -117,6 +166,9 @@ func agentScope(c *gin.Context) (services.AgentScope, bool) {
 func respondAgentError(c *gin.Context, err error, action string) {
 	if errors.Is(err, services.ErrAgentNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Agent not found"})
+		return
+	}
+	if respondVisibilityError(c, err) {
 		return
 	}
 	c.JSON(http.StatusInternalServerError, gin.H{"error": action, "details": err.Error()})
@@ -157,6 +209,9 @@ func (h *AgentHandlers) CreateAgent(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, services.ErrAgentNotFound) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot create an agent outside your space"})
+			return
+		}
+		if respondVisibilityError(c, err) {
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create agent", "details": err.Error()})
@@ -781,7 +836,7 @@ func (h *AgentHandlers) UpdateAgent(c *gin.Context) {
 
 	agent, err := h.agentService.UpdateAgent(c.Request.Context(), agentID, req, scope)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update agent", "details": err.Error()})
+		respondAgentError(c, err, "Failed to update agent")
 		return
 	}
 
@@ -838,6 +893,14 @@ func (h *AgentHandlers) ListAgents(c *gin.Context) {
 	if isPublicStr := c.Query("is_public"); isPublicStr != "" {
 		isPublic := isPublicStr == "true"
 		filter.IsPublic = &isPublic
+	}
+	if v := c.Query("visibility"); v != "" {
+		vis := models.AgentVisibility(v)
+		if !vis.Valid() {
+			c.JSON(http.StatusBadRequest, gin.H{"error": services.ErrInvalidVisibility.Error(), "code": "visibility_invalid"})
+			return
+		}
+		filter.Visibility = &vis
 	}
 
 	if isTemplateStr := c.Query("is_template"); isTemplateStr != "" {
@@ -984,7 +1047,7 @@ func (h *AgentHandlers) DuplicateAgent(c *gin.Context) {
 
 	agent, err := h.agentService.DuplicateAgent(c.Request.Context(), sourceID, req.Name, scope, tenantStr)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to duplicate agent", "details": err.Error()})
+		respondAgentError(c, err, "Failed to duplicate agent")
 		return
 	}
 

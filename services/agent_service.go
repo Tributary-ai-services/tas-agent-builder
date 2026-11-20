@@ -21,7 +21,25 @@ type AgentScope struct {
 	// Space ids are opaque strings ("space_1766596584", or a UUID for some
 	// organisation spaces) — never parse one.
 	SpaceID string
+	// OrganizationID is the Organization of the verified space, from
+	// aether-be ("" for a personal space). "organization" agents are readable
+	// exactly when it matches theirs.
+	OrganizationID string
+	// CanPublishPublic is true when the caller holds the realm role that may
+	// set visibility "public" (PUBLIC_AGENT_ROLE, default "admin").
+	CanPublishPublic bool
 }
+
+// ErrPublicRequiresAdmin refuses visibility "public" to a caller without the
+// publishing role. Public agents are readable by every user of every org.
+var ErrPublicRequiresAdmin = errors.New("visibility public requires the admin role")
+
+// ErrOrganizationRequiresOrgSpace refuses visibility "organization" in a space
+// that belongs to no Organization: there would be no one to share it with.
+var ErrOrganizationRequiresOrgSpace = errors.New("visibility organization requires an organization space")
+
+// ErrInvalidVisibility is a visibility outside private|organization|public.
+var ErrInvalidVisibility = errors.New("visibility must be private, organization or public")
 
 // ErrAgentNotFound is returned when no agent matches, whether because it does
 // not exist or because it is outside the caller's scope. The two are not

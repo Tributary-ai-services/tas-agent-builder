@@ -24,7 +24,11 @@ commonLabels:
 # Keep this pin equal to what is actually deployed, or apply -k becomes a
 # downgrade. See OPS-14 on floating tags -- :latest is itself a problem, and the
 # real fix is a rebuild tagged from a commit, which this pin should then track.
+# 2026-11-20 (Plan #22 W0.0): this said `latest` while production ran
+# spaceiso-892ff8f (digest sha256:56272184...), so `apply -k` would have
+# rolled onto a floating tag. Pinned to what runs; 1.0.0 (AB-13) follows. The model-migration
+# CronJob pins its own image (a different build) in its manifest.
 images:
 - name: agent-builder
   newName: registry-api.tas.scharber.com/tas-agent-builder
-  newTag: latest
+  newTag: 1.0.0
