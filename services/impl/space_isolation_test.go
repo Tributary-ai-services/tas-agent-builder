@@ -63,6 +63,8 @@ func newTestDB(t *testing.T) *gorm.DB {
 		status TEXT NOT NULL DEFAULT 'draft',
 		space_type TEXT NOT NULL,
 		type TEXT NOT NULL DEFAULT 'conversational',
+		visibility TEXT NOT NULL DEFAULT 'private',
+		organization_id TEXT NOT NULL DEFAULT '',
 		is_public BOOLEAN DEFAULT 0,
 		is_template BOOLEAN DEFAULT 0,
 		is_internal BOOLEAN DEFAULT 0,
@@ -100,26 +102,38 @@ type agentSeed struct {
 	isPublic   bool
 	isInternal bool
 	isTemplate bool
+	// visibility overrides the one derived from isPublic (AB-13).
+	visibility models.AgentVisibility
+	org        string
 }
 
 func seedAgent(t *testing.T, db *gorm.DB, s agentSeed) models.Agent {
 	t.Helper()
 
+	vis := s.visibility
+	if vis == "" {
+		vis = models.VisibilityPrivate
+		if s.isPublic {
+			vis = models.VisibilityPublic
+		}
+	}
 	agent := models.Agent{
-		ID:           uuid.New(),
-		Name:         s.name,
-		SystemPrompt: "you are a test",
-		OwnerID:      s.owner,
-		SpaceID:      s.space,
-		TenantID:     "tenant_test",
-		Status:       models.AgentStatusDraft,
-		SpaceType:    models.SpaceTypePersonal,
-		Type:         models.AgentTypeConversational,
-		IsPublic:     s.isPublic,
-		IsInternal:   s.isInternal,
-		IsTemplate:   s.isTemplate,
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		ID:             uuid.New(),
+		Visibility:     vis,
+		OrganizationID: s.org,
+		Name:           s.name,
+		SystemPrompt:   "you are a test",
+		OwnerID:        s.owner,
+		SpaceID:        s.space,
+		TenantID:       "tenant_test",
+		Status:         models.AgentStatusDraft,
+		SpaceType:      models.SpaceTypePersonal,
+		Type:           models.AgentTypeConversational,
+		IsPublic:       vis == models.VisibilityPublic,
+		IsInternal:     s.isInternal,
+		IsTemplate:     s.isTemplate,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
 	}
 	if err := db.Create(&agent).Error; err != nil {
 		t.Fatalf("seed agent %q: %v", s.name, err)

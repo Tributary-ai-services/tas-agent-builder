@@ -238,6 +238,20 @@ type Agent struct {
 	SpaceType SpaceType   `json:"space_type" gorm:"type:varchar(50);not null"`
 	Type      AgentType   `json:"type" gorm:"type:varchar(50);not null;default:'conversational'"`
 
+	// Visibility decides who may READ (and so run or copy) the agent. It
+	// never changes who owns it or who pays for a run (Plan #22 D15).
+	//   private       the owner, in the space it was created in
+	//   organization  anyone working in a space of the same Organization
+	//   public        everyone; setting it needs the PUBLIC_AGENT_ROLE realm role
+	Visibility AgentVisibility `json:"visibility" gorm:"type:varchar(20);not null;default:'private'"`
+	// OrganizationID is the Aether Organization of the space the agent lives
+	// in, as aether-be's membership check reports it; "" for personal spaces
+	// and for organization spaces with no HAS_SPACE edge.
+	OrganizationID string `json:"organization_id" gorm:"type:varchar(255);not null;default:''"`
+
+	// IsPublic is kept for one release so existing readers keep working. It
+	// always equals Visibility == "public" (CHECK agents_is_public_matches,
+	// migration 023) and is written only alongside Visibility.
 	IsPublic   bool `json:"is_public" gorm:"default:false"`
 	IsTemplate bool `json:"is_template" gorm:"default:false"`
 	IsInternal bool `json:"is_internal" gorm:"default:false"` // System agents available to all users
@@ -266,6 +280,24 @@ func (Agent) TableName() string {
 	return "agent_builder.agents"
 }
 
+// AgentVisibility is one of the three sharing levels (AB-13).
+type AgentVisibility string
+
+const (
+	VisibilityPrivate      AgentVisibility = "private"
+	VisibilityOrganization AgentVisibility = "organization"
+	VisibilityPublic       AgentVisibility = "public"
+)
+
+// Valid reports whether v is one of the three levels.
+func (v AgentVisibility) Valid() bool {
+	switch v {
+	case VisibilityPrivate, VisibilityOrganization, VisibilityPublic:
+		return true
+	}
+	return false
+}
+
 type CreateAgentRequest struct {
 	Name         string         `json:"name" validate:"required,min=1,max=255"`
 	Description  string         `json:"description" validate:"max=1000"`
@@ -274,12 +306,15 @@ type CreateAgentRequest struct {
 	SpaceID      string         `json:"space_id" validate:"required"`
 	SpaceType    SpaceType      `json:"space_type"` // "personal" or "organization" - defaults to "personal" if not specified
 	Type         AgentType      `json:"type"`       // "conversational", "qa", or "producer" - defaults to "conversational"
-	IsPublic     bool           `json:"is_public"`
-	IsTemplate   bool           `json:"is_template"`
-	IsInternal   bool           `json:"is_internal"` // System agents - only settable by system
-	NotebookIDs  []uuid.UUID    `json:"notebook_ids"`
-	Tags         []string       `json:"tags"`
-	Skills       []string       `json:"skills"`
+	// Visibility is preferred. IsPublic is still accepted from older
+	// clients: true means "public", and is ignored when Visibility is set.
+	Visibility  *AgentVisibility `json:"visibility,omitempty"`
+	IsPublic    bool             `json:"is_public"`
+	IsTemplate  bool             `json:"is_template"`
+	IsInternal  bool             `json:"is_internal"` // System agents - only settable by system
+	NotebookIDs []uuid.UUID      `json:"notebook_ids"`
+	Tags        []string         `json:"tags"`
+	Skills      []string         `json:"skills"`
 
 	// Document Context Configuration
 	EnableKnowledge bool                   `json:"enable_knowledge"`
@@ -288,18 +323,19 @@ type CreateAgentRequest struct {
 }
 
 type UpdateAgentRequest struct {
-	Name         *string         `json:"name,omitempty" validate:"omitempty,min=1,max=255"`
-	Description  *string         `json:"description,omitempty" validate:"omitempty,max=1000"`
-	SystemPrompt *string         `json:"system_prompt,omitempty" validate:"omitempty,min=1"`
-	LLMConfig    *AgentLLMConfig `json:"llm_config,omitempty"`
-	Status       *AgentStatus    `json:"status,omitempty"`
-	Type         *AgentType      `json:"type,omitempty"`
-	IsPublic     *bool           `json:"is_public,omitempty"`
-	IsTemplate   *bool           `json:"is_template,omitempty"`
-	IsInternal   *bool           `json:"is_internal,omitempty"` // System agents - only settable by system
-	NotebookIDs  []uuid.UUID     `json:"notebook_ids,omitempty"`
-	Tags         []string        `json:"tags,omitempty"`
-	Skills       []string        `json:"skills,omitempty"`
+	Name         *string          `json:"name,omitempty" validate:"omitempty,min=1,max=255"`
+	Description  *string          `json:"description,omitempty" validate:"omitempty,max=1000"`
+	SystemPrompt *string          `json:"system_prompt,omitempty" validate:"omitempty,min=1"`
+	LLMConfig    *AgentLLMConfig  `json:"llm_config,omitempty"`
+	Status       *AgentStatus     `json:"status,omitempty"`
+	Type         *AgentType       `json:"type,omitempty"`
+	Visibility   *AgentVisibility `json:"visibility,omitempty"`
+	IsPublic     *bool            `json:"is_public,omitempty"` // legacy; ignored when Visibility is set
+	IsTemplate   *bool            `json:"is_template,omitempty"`
+	IsInternal   *bool            `json:"is_internal,omitempty"` // System agents - only settable by system
+	NotebookIDs  []uuid.UUID      `json:"notebook_ids,omitempty"`
+	Tags         []string         `json:"tags,omitempty"`
+	Skills       []string         `json:"skills,omitempty"`
 
 	// Document Context Configuration
 	EnableKnowledge *bool                  `json:"enable_knowledge,omitempty"`
@@ -320,16 +356,17 @@ type AgentListFilter struct {
 	// and space ids "space_1766596584". Typing them as UUIDs meant any
 	// request that actually used them was rejected at parse time with a 400,
 	// which is why space filtering could never have worked (AB-5).
-	OwnerID    *string      `json:"owner_id"`
-	SpaceID    *string      `json:"space_id"`
-	TenantID   *string      `json:"tenant_id"`
-	Status     *AgentStatus `json:"status"`
-	SpaceType  *SpaceType   `json:"space_type"`
-	IsPublic   *bool        `json:"is_public"`
-	IsTemplate *bool        `json:"is_template"`
-	IsInternal *bool        `json:"is_internal"` // Filter for system agents
-	Tags       []string     `json:"tags"`
-	Search     string       `json:"search"`
-	Page       int          `json:"page"`
-	Size       int          `json:"size"`
+	OwnerID    *string          `json:"owner_id"`
+	SpaceID    *string          `json:"space_id"`
+	TenantID   *string          `json:"tenant_id"`
+	Status     *AgentStatus     `json:"status"`
+	SpaceType  *SpaceType       `json:"space_type"`
+	IsPublic   *bool            `json:"is_public"`
+	Visibility *AgentVisibility `json:"visibility"`
+	IsTemplate *bool            `json:"is_template"`
+	IsInternal *bool            `json:"is_internal"` // Filter for system agents
+	Tags       []string         `json:"tags"`
+	Search     string           `json:"search"`
+	Page       int              `json:"page"`
+	Size       int              `json:"size"`
 }

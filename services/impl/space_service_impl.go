@@ -91,12 +91,13 @@ func (s *spaceVerifierImpl) store(key string, entry membershipCacheEntry) {
 
 // membershipResponse mirrors aether-be's SpaceMembershipResponse.
 type membershipResponse struct {
-	Member      bool     `json:"member"`
-	SpaceID     string   `json:"space_id"`
-	SpaceType   string   `json:"space_type"`
-	TenantID    string   `json:"tenant_id"`
-	UserRole    string   `json:"user_role"`
-	Permissions []string `json:"permissions"`
+	Member         bool     `json:"member"`
+	SpaceID        string   `json:"space_id"`
+	SpaceType      string   `json:"space_type"`
+	TenantID       string   `json:"tenant_id"`
+	OrganizationID string   `json:"organization_id"`
+	UserRole       string   `json:"user_role"`
+	Permissions    []string `json:"permissions"`
 }
 
 func (s *spaceVerifierImpl) VerifyMembership(ctx context.Context, userID, bearerToken, spaceID, spaceType string) (*services.SpaceMembership, error) {
@@ -148,11 +149,12 @@ func (s *spaceVerifierImpl) VerifyMembership(ctx context.Context, userID, bearer
 			return nil, services.ErrSpaceAccessDenied
 		}
 		membership := &services.SpaceMembership{
-			SpaceID:     body.SpaceID,
-			SpaceType:   body.SpaceType,
-			TenantID:    body.TenantID,
-			UserRole:    body.UserRole,
-			Permissions: body.Permissions,
+			SpaceID:        body.SpaceID,
+			SpaceType:      body.SpaceType,
+			TenantID:       body.TenantID,
+			OrganizationID: body.OrganizationID,
+			UserRole:       body.UserRole,
+			Permissions:    body.Permissions,
 		}
 		s.store(key, membershipCacheEntry{membership: membership, expiresAt: time.Now().Add(membershipTTL)})
 		return membership, nil

@@ -25,11 +25,17 @@ func NewAgentService(db *gorm.DB) services.AgentService {
 
 // visibleToScope narrows a query to the agents the caller may READ.
 //
-// Three disjoint reasons an agent is readable:
+// Four reasons an agent is readable:
 //   - it is the caller's own, in the space they were verified into
 //   - it is an internal system agent, which belongs to no space by design
-//   - it is public, which is an explicit choice by its owner to share it
-//     beyond their space (templates, the shared library)
+//   - its visibility is "public" (admin-set: templates, the shared library)
+//   - its visibility is "organization" and the caller is working in a space
+//     of the same Aether Organization (AB-13). An empty organization id
+//     never matches, so a personal-space caller sees no org agents.
+//
+// Until AB-13 the fourth line was "OR is_public = true" with no tenant
+// condition, so one click on "make public" shared an agent's system prompt
+// and notebook bindings with every user of every organization.
 //
 // Note what this is NOT: it does not make every agent in a space readable by
 // every member. That would be a widening, and nothing here knows space roles.
@@ -37,9 +43,45 @@ func NewAgentService(db *gorm.DB) services.AgentService {
 // so it can only ever return a subset of what it used to.
 func visibleToScope(query *gorm.DB, scope services.AgentScope) *gorm.DB {
 	return query.Where(
-		"((owner_id = ? AND space_id = ?) OR is_internal = true OR is_public = true)",
-		scope.UserID, scope.SpaceID,
+		"((owner_id = ? AND space_id = ?) OR is_internal = true OR visibility = 'public'"+
+			" OR (visibility = 'organization' AND organization_id <> '' AND organization_id = ?))",
+		scope.UserID, scope.SpaceID, scope.OrganizationID,
 	)
+}
+
+// resolveVisibility decides the visibility a write asks for. requested wins;
+// legacyPublic (the old is_public flag) is honoured only without it. ok is
+// false when the request does not touch visibility at all.
+func resolveVisibility(requested *models.AgentVisibility, legacyPublic *bool) (v models.AgentVisibility, ok bool, err error) {
+	switch {
+	case requested != nil:
+		v = *requested
+	case legacyPublic != nil && *legacyPublic:
+		v = models.VisibilityPublic
+	case legacyPublic != nil:
+		v = models.VisibilityPrivate
+	default:
+		return "", false, nil
+	}
+	if !v.Valid() {
+		return "", false, services.ErrInvalidVisibility
+	}
+	return v, true, nil
+}
+
+// authorizeVisibility applies the two rules on who may set what.
+func authorizeVisibility(v models.AgentVisibility, scope services.AgentScope) error {
+	switch v {
+	case models.VisibilityPublic:
+		if !scope.CanPublishPublic {
+			return services.ErrPublicRequiresAdmin
+		}
+	case models.VisibilityOrganization:
+		if scope.OrganizationID == "" {
+			return services.ErrOrganizationRequiresOrgSpace
+		}
+	}
+	return nil
 }
 
 // writableByScope narrows a query to the agents the caller may MODIFY.
@@ -87,20 +129,37 @@ func (s *agentServiceImpl) CreateAgent(ctx context.Context, req models.CreateAge
 		enableMemory = true
 	}
 
+	var legacy *bool
+	if req.IsPublic {
+		legacy = &req.IsPublic
+	}
+	visibility, set, err := resolveVisibility(req.Visibility, legacy)
+	if err != nil {
+		return nil, err
+	}
+	if !set {
+		visibility = models.VisibilityPrivate
+	}
+	if err := authorizeVisibility(visibility, scope); err != nil {
+		return nil, err
+	}
+
 	agent := &models.Agent{
-		ID:           uuid.New(),
-		Name:         req.Name,
-		Description:  req.Description,
-		SystemPrompt: req.SystemPrompt,
-		LLMConfig:    req.LLMConfig,
-		OwnerID:      scope.UserID,
-		SpaceID:      scope.SpaceID,
-		SpaceType:    spaceType,
-		Type:         agentType,
-		TenantID:     tenantID,
-		Status:       models.AgentStatusDraft,
-		IsPublic:     req.IsPublic,
-		IsTemplate:   req.IsTemplate,
+		ID:             uuid.New(),
+		Name:           req.Name,
+		Description:    req.Description,
+		SystemPrompt:   req.SystemPrompt,
+		LLMConfig:      req.LLMConfig,
+		OwnerID:        scope.UserID,
+		SpaceID:        scope.SpaceID,
+		SpaceType:      spaceType,
+		Type:           agentType,
+		TenantID:       tenantID,
+		Status:         models.AgentStatusDraft,
+		Visibility:     visibility,
+		OrganizationID: scope.OrganizationID,
+		IsPublic:       visibility == models.VisibilityPublic,
+		IsTemplate:     req.IsTemplate,
 		// IsInternal is NOT taken from the request. Internal agents are the
 		// shared system tools every user can see and run; letting a caller
 		// mint one would be a way to plant an agent in everyone's list.
@@ -219,8 +278,20 @@ func (s *agentServiceImpl) UpdateAgent(ctx context.Context, id uuid.UUID, req mo
 	if req.Type != nil {
 		updates["type"] = *req.Type
 	}
-	if req.IsPublic != nil {
-		updates["is_public"] = *req.IsPublic
+	visibility, set, err := resolveVisibility(req.Visibility, req.IsPublic)
+	if err != nil {
+		return nil, err
+	}
+	if set {
+		if err := authorizeVisibility(visibility, scope); err != nil {
+			return nil, err
+		}
+		updates["visibility"] = visibility
+		updates["is_public"] = visibility == models.VisibilityPublic
+		// The write is owner-only in this very space, so the space's org is
+		// the agent's org; this also fills it in for agents created before
+		// AB-13, which have "".
+		updates["organization_id"] = scope.OrganizationID
 	}
 	if req.IsTemplate != nil {
 		updates["is_template"] = *req.IsTemplate
@@ -331,7 +402,14 @@ func (s *agentServiceImpl) ListAgents(ctx context.Context, filter models.AgentLi
 		query = query.Where("space_type = ?", *filter.SpaceType)
 	}
 	if filter.IsPublic != nil {
-		query = query.Where("is_public = ?", *filter.IsPublic)
+		if *filter.IsPublic {
+			query = query.Where("visibility = 'public'")
+		} else {
+			query = query.Where("visibility <> 'public'")
+		}
+	}
+	if filter.Visibility != nil {
+		query = query.Where("visibility = ?", *filter.Visibility)
 	}
 	if filter.IsTemplate != nil {
 		query = query.Where("is_template = ?", *filter.IsTemplate)
@@ -419,12 +497,11 @@ func (s *agentServiceImpl) UnpublishAgent(ctx context.Context, id uuid.UUID, sco
 func (s *agentServiceImpl) DuplicateAgent(ctx context.Context, sourceID uuid.UUID, newName string, scope services.AgentScope, tenantID string) (*models.Agent, error) {
 	var sourceAgent models.Agent
 
-	// Readable as a source: the caller's own agent in this space, a system
-	// agent, a public one, or a template. Templates are a sharing mechanism
-	// like is_public, so they stay copyable across spaces.
-	query := s.db.WithContext(ctx).Where("id = ?", sourceID).
-		Where("((owner_id = ? AND space_id = ?) OR is_internal = true OR is_public = true OR is_template = true)",
-			scope.UserID, scope.SpaceID)
+	// Readable as a source means readable, full stop: the same rule as
+	// GetAgent (AB-13). This used to add "OR is_template = true", which let
+	// any user copy any template of any organization, including its system
+	// prompt. A template meant for everyone is now made "public" by an admin.
+	query := visibleToScope(s.db.WithContext(ctx).Where("id = ?", sourceID), scope)
 
 	if err := query.First(&sourceAgent).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -444,6 +521,9 @@ func (s *agentServiceImpl) DuplicateAgent(ctx context.Context, sourceID uuid.UUI
 	// A copy is never a system agent, whatever it was copied from.
 	newAgent.IsInternal = false
 	newAgent.Status = models.AgentStatusDraft
+	// A copy starts private, in the caller's space and organization.
+	newAgent.Visibility = models.VisibilityPrivate
+	newAgent.OrganizationID = scope.OrganizationID
 	newAgent.IsPublic = false
 	newAgent.IsTemplate = false
 	newAgent.TotalExecutions = 0
@@ -471,7 +551,9 @@ func (s *agentServiceImpl) GetAgentsBySpace(ctx context.Context, scope services.
 	var agents []models.Agent
 
 	query := s.db.WithContext(ctx).
-		Where("space_id = ? AND (owner_id = ? OR is_public = true)", scope.SpaceID, scope.UserID)
+		Where("space_id = ? AND (owner_id = ? OR visibility = 'public'"+
+			" OR (visibility = 'organization' AND organization_id <> '' AND organization_id = ?))",
+			scope.SpaceID, scope.UserID, scope.OrganizationID)
 
 	if err := query.Order("created_at DESC").Find(&agents).Error; err != nil {
 		return nil, fmt.Errorf("failed to get agents by space: %w", err)
