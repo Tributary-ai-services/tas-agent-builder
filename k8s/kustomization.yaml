@@ -26,9 +26,9 @@ commonLabels:
 # real fix is a rebuild tagged from a commit, which this pin should then track.
 # 2026-11-20 (Plan #22 W0.0): this said `latest` while production ran
 # spaceiso-892ff8f (digest sha256:56272184...), so `apply -k` would have
-# rolled onto a floating tag. Pinned to what runs. The model-migration
+# rolled onto a floating tag. Pinned to what runs; 1.0.0 (AB-13) follows. The model-migration
 # CronJob pins its own image (a different build) in its manifest.
 images:
 - name: agent-builder
   newName: registry-api.tas.scharber.com/tas-agent-builder
-  newTag: spaceiso-892ff8f
+  newTag: 1.0.0
